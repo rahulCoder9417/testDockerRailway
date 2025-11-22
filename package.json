@@ -1,0 +1,19 @@
+{
+  "name": "testrailwaynode",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0",
+    "ws": "^8.16.0",
+    "node-pty": "^1.0.0",
+    "cors": "^2.8.5"
+  }
+}
