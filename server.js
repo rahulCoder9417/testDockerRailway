@@ -9,7 +9,8 @@ import cors from "cors";
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
-
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 // ---- CONFIG ----
 const PROJECT_ROOT = path.join(__dirname, "projects", "sample");
 
