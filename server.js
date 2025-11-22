@@ -5,6 +5,7 @@ import pty from "node-pty";
 import path from "path";
 import fs from "fs";
 import cors from "cors";
+import { fileURLToPath } from "url";
 
 const app = express();
 const server = http.createServer(app);
