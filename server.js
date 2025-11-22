@@ -16,7 +16,16 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.join(__dirname, "projects", "sample");
 
 // ---- MIDDLEWARE ----
-app.use(cors());
+app.use(cors(
+  {
+    origin: [
+      "http://localhost:5173",                          // Vite dev
+      "https://devsync-runner.onrender.com"        // Your Render domain
+    ],
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true
+  }
+));
 app.use(express.json());
 
 // Simple health check
@@ -59,53 +68,33 @@ app.post("/api/files/save", async (req, res) => {
 //  - user sends keystrokes/commands over ws -> pty.write()
 //  - pty output -> ws.send()
 //
-const wss = new WebSocketServer({ server, path: "/ws/terminal" });
+const wss = new WebSocketServer({ noServer: true });
 
 wss.on("connection", (ws) => {
   console.log("Client connected to terminal");
 
-  const shell = process.platform === "win32" ? "bash.exe" : "bash";
-  const shellArgs = [];
-  const env = Object.assign({}, process.env);
-
-  const ptyProcess = pty.spawn(shell, shellArgs, {
+  const shell = "bash";
+  const ptyProcess = pty.spawn(shell, [], {
     name: "xterm-color",
     cols: 80,
     rows: 25,
     cwd: PROJECT_ROOT,
-    env
+    env: process.env
   });
 
-  // OPTION: auto-run project on connect
-  // ptyProcess.write("npm install\n");
-  // ptyProcess.write("npm start\n");
+  ptyProcess.on("data", data => ws.send(data));
+  ws.on("message", msg => ptyProcess.write(msg));
+  ws.on("close", () => ptyProcess.kill());
+});
 
-  ptyProcess.on("data", (data) => {
-    try {
-      ws.send(data);
-    } catch (err) {
-      console.error("Error sending WS data:", err);
-    }
-  });
-
-  ws.on("message", (msg) => {
-    // msg can be string or Buffer
-    const str = msg.toString();
-    ptyProcess.write(str);
-  });
-
-  ws.on("close", () => {
-    console.log("WS closed, killing pty");
-    try {
-      ptyProcess.kill();
-    } catch (e) {
-      console.error("Error killing pty:", e);
-    }
-  });
-
-  ws.on("error", (err) => {
-    console.error("WS error:", err);
-  });
+server.on("upgrade", (req, socket, head) => {
+  if (req.url === "/ws/terminal") {
+    wss.handleUpgrade(req, socket, head, ws => {
+      wss.emit("connection", ws, req);
+    });
+  } else {
+    socket.destroy(); // reject other requests
+  }
 });
 
 // ---- START SERVER ----
