@@ -1,0 +1,51 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Logs
+logs
+*.log
+log.txt
+
+# OS crap
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-data/
+docker-compose.override.yml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# Temporary files
+tmp/
+*.tmp
+
+# Uploaded files inside project workspace
+projects/*/node_modules/
+projects/*/.cache/
+projects/*/dist/
+projects/*/build/
+projects/*/*.log
+
+# Cache
+.cache/
+.nyc_output/
+
+# Rai
