@@ -1,6 +1,6 @@
 import express from "express";
 import http from "http";
-import WebSocket from "ws";
+import {WebSocketServer} from "ws";
 import pty from "node-pty";
 import path from "path";
 import fs from "fs";
@@ -59,7 +59,7 @@ app.post("/api/files/save", async (req, res) => {
 //  - user sends keystrokes/commands over ws -> pty.write()
 //  - pty output -> ws.send()
 //
-const wss = new WebSocket.Server({ server, path: "/ws/terminal" });
+const wss = new WebSocketServer({ server, path: "/ws/terminal" });
 
 wss.on("connection", (ws) => {
   console.log("Client connected to terminal");
