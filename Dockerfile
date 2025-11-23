@@ -1,5 +1,5 @@
 # =====================================================================
-# 1. Base Image (Ubuntu 22.04) – good for all languages + node-pty
+# 1. Base Image (Ubuntu 22.04) – good for all languages + node-pty + GUI
 # =====================================================================
 FROM ubuntu:22.04
 
@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TERM=xterm-256color
 
 # =====================================================================
-# 2. Install Core Tools
+# 2. Install Core Tools + GUI stack (Xvfb, x11vnc, fluxbox, noVNC)
 # =====================================================================
 RUN apt-get update && apt-get install -y \
     curl \
@@ -19,6 +19,10 @@ RUN apt-get update && apt-get install -y \
     software-properties-common \
     pkg-config \
     ca-certificates \
+    xvfb \
+    x11vnc \
+    fluxbox \
+    novnc \
     && rm -rf /var/lib/apt/lists/*
 
 # =====================================================================
