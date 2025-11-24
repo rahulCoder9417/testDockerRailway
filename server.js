@@ -262,7 +262,7 @@ wss.on("connection", (ws, req) => {
     const regex = /https?:\/\/(localhost|127\.0\.0\.1)(?::(\d{1,5}))?/g;
 
     let match;
-    console.log(data);
+    data = data.replace(/\x1b\[[0-9;]*m/g, '');
     while ((match = regex.exec(data)) !== null) {
       console.log("match", match);
       const port = match[2];
