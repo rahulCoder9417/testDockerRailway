@@ -259,10 +259,12 @@ wss.on("connection", (ws, req) => {
     ws.send(data);
 
     // devserver detection
-    const regex = /(localhost|127\.0\.0\.1):(\d{2,5})/g;
+    const regex = /https?:\/\/(localhost|127\.0\.0\.1)(?::(\d{1,5}))?/g;
+
     let match;
     console.log(data);
     while ((match = regex.exec(data)) !== null) {
+      console.log("match", match);
       const port = match[2];
       const token = generatePreviewToken(userId, port);
 
