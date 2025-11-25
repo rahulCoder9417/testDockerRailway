@@ -18,6 +18,8 @@ const PORT = process.env.PORT || 3000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// -------------------- SESSION & PROJECT CONFIG --------------------
+
 /**
  * sessions structure:
  * {
@@ -40,15 +42,49 @@ const __dirname = path.dirname(__filename);
  */
 const sessions = {};
 
-// ---- CONFIG ----
 const PROJECT_ROOT = path.join(__dirname, "projects", "sample");
 
-// ---- GUI CONFIG ----
+// -------------------- DEV SERVER PORT ALLOCATION --------------------
+
+// We want: first user → 3000, next → 3001, etc.
+const DEV_PORT_START = 3000;
+let nextFreeDevPort = DEV_PORT_START;
+
+// Map userId → dev server port
+const userDevPorts = {};
+
+/**
+ * Allocate a dev port for a user.
+ * - Always give the same port to the same user
+ * - Next user increments the port
+ */
+function allocateDevPortForUser(userId) {
+  if (userDevPorts[userId]) return userDevPorts[userId];
+  const port = nextFreeDevPort++;
+  userDevPorts[userId] = port;
+  console.log(`Allocated dev port ${port} for user=${userId}`);
+  return port;
+}
+
+/**
+ * Free dev port (called when user's terminal closes).
+ * - We don't reuse ports in this simplistic version, but we do clean the mapping.
+ */
+function releaseDevPortForUser(userId) {
+  if (userDevPorts[userId]) {
+    console.log(`Releasing dev port ${userDevPorts[userId]} for user=${userId}`);
+    delete userDevPorts[userId];
+  }
+}
+
+// -------------------- GUI CONFIG --------------------
+
 const GUI_BASE_DISPLAY = 100;
 const GUI_BASE_VNC_PORT = 5900;
 let nextGuiIndex = 1; // increment per GUI session
 
-// ---- TOKEN GENERATION ----
+// -------------------- TOKEN GENERATION --------------------
+
 function generatePreviewToken(userId, port) {
   const secret = process.env.PREVIEW_SECRET || "supersecret";
   const data = `${userId}:${port}`;
@@ -65,7 +101,8 @@ function verifyPreviewToken(token, userId, port) {
   return recalculated === token;
 }
 
-// Helper: get or create user session
+// -------------------- SESSION HELPERS --------------------
+
 function getUserSession(userId) {
   if (!sessions[userId]) {
     sessions[userId] = { terminals: {}, gui: null };
@@ -73,8 +110,10 @@ function getUserSession(userId) {
   return sessions[userId];
 }
 
+// -------------------- GUI SESSION MANAGEMENT --------------------
+
 /**
- * Start GUI (Xvfb + x11vnc + optional fluxbox) for a user if not already started.
+ * Start GUI (Xvfb + x11vnc + fluxbox) for a user if not already started.
  * Returns the gui session object: { display, vncPort, index, processes }
  */
 function ensureGuiSession(userId) {
@@ -86,8 +125,8 @@ function ensureGuiSession(userId) {
 
   const index = nextGuiIndex++;
   const displayNum = GUI_BASE_DISPLAY + index; // e.g. 101
-  const display = `:${displayNum}`; // ':101'
-  const vncPort = GUI_BASE_VNC_PORT + index; // 5901, 5902, ...
+  const display = `:${displayNum}`;           // ':101'
+  const vncPort = GUI_BASE_VNC_PORT + index;  // 5901, 5902, ...
 
   // Start Xvfb (virtual display)
   const xvfb = spawn("Xvfb", [display, "-screen", "0", "1920x1080x24"], {
@@ -144,7 +183,7 @@ function ensureGuiSession(userId) {
 }
 
 /**
- * Optional: stop GUI session for a user (not wired to any route yet)
+ * Optional: stop GUI session for a user
  */
 function stopGuiSession(userId) {
   const session = sessions[userId];
@@ -161,7 +200,8 @@ function stopGuiSession(userId) {
   session.gui = null;
 }
 
-// ---- CORS ----
+// -------------------- MIDDLEWARE & STATIC --------------------
+
 app.use(
   cors({
     origin: ["http://localhost:5173", "https://devsync-runner.onrender.com"],
@@ -169,14 +209,15 @@ app.use(
     credentials: true,
   })
 );
+
 app.use(express.json());
 
-// ---- HEALTH CHECK ----
+// Health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok", projectRoot: PROJECT_ROOT });
 });
 
-// ---- SAVE FILE ----
+// Save file API
 app.post("/api/files/save", async (req, res) => {
   try {
     const { relativePath, content } = req.body;
@@ -201,33 +242,62 @@ app.post("/api/files/save", async (req, res) => {
     res.status(500).json({ error: "Failed to save file" });
   }
 });
+
+// Serve project files
 app.use("/projects", express.static(path.join(__dirname, "projects")));
 
-// ---- SERVE noVNC STATIC FILES ----
-// Ubuntu's novnc package puts static files in /usr/share/novnc
+// Serve noVNC static files (assumes novnc installed at /usr/share/novnc)
 app.use("/novnc", express.static("/usr/share/novnc"));
 
-// ---- /gui/:userId → redirects into noVNC with proper WS path ----
+// GUI route → redirects into noVNC with proper WS path
 app.get("/gui/:userId", (req, res) => {
   const { userId } = req.params;
 
   // Ensure GUI session is running (starts Xvfb + x11vnc if needed)
-  const gui = ensureGuiSession(userId);
+  ensureGuiSession(userId);
 
-  // We will use noVNC's vnc.html, and tell it to connect to /websockify/:userId
+  // Use noVNC's vnc.html, and tell it to connect to /websockify/:userId
   const encodedUser = encodeURIComponent(userId);
   const url = `/novnc/vnc.html?path=websockify/${encodedUser}&autoconnect=true&resize=scale`;
 
-  // Redirect to noVNC client page
   res.redirect(url);
 });
 
-// ---- WEBSOCKET + PTY (code runner) ----
-const wss = new WebSocketServer({ noServer: true });
+// -------------------- SECURE DEV SERVER PREVIEW PROXY --------------------
 
-// VNC websockify bridge (WS <-> TCP VNC)
-const vncWss = new WebSocketServer({ noServer: true });
+// NOTE: We no longer pass port in the URL. Port is derived from userDevPorts[userId].
+// Frontend iframe URL: /preview/<userId>?token=<token>
+app.use("/preview/:userId", (req, res, next) => {
+  const { userId } = req.params;
+  const { token } = req.query;
 
+  const port = userDevPorts[userId];
+  if (!port) {
+    return res.status(404).send("No dev server preview available for this user");
+  }
+
+  if (!token) {
+    return res.status(403).send("Missing token");
+  }
+
+  if (!verifyPreviewToken(token, userId, port)) {
+    return res.status(403).send("Invalid or expired preview token");
+  }
+
+  return createProxyMiddleware({
+    target: `http://localhost:${port}`,
+    changeOrigin: true,
+    ws: true,
+    pathRewrite: (pathStr) => pathStr.replace(`/preview/${userId}`, ""),
+  })(req, res, next);
+});
+
+// -------------------- WEBSOCKETS --------------------
+
+const wss = new WebSocketServer({ noServer: true });   // PTY terminals
+const vncWss = new WebSocketServer({ noServer: true }); // VNC bridge
+
+// Terminal WebSocket
 wss.on("connection", (ws, req) => {
   const userId = req.userId;
   const terminalId = req.terminalId;
@@ -242,48 +312,69 @@ wss.on("connection", (ws, req) => {
     env.DISPLAY = session.gui.display;
   }
 
+  // Allocate a unique dev port for this user and inject PORT into env
+  const devPort = allocateDevPortForUser(userId);
+  const envWithPort = {
+    ...env,
+    PORT: String(devPort),
+  };
+
   // Create terminal-specific PTY
   const ptyProcess = pty.spawn("bash", [], {
     name: "xterm-color",
     cols: 80,
     rows: 25,
     cwd: PROJECT_ROOT,
-    env,
+    env: envWithPort,
   });
 
   // Save PTY instance in session
   session.terminals[terminalId] = ptyProcess;
 
+  // Used to only send PREVIEW event once when dev server is actually up
+  let previewSent = false;
+
   // PTY output → WS
-  ptyProcess.on("data", (data) => {
+  ptyProcess.on("data", (chunk) => {
+    let data = chunk.toString();
     ws.send(data);
 
-    // devserver detection
-    const regex = /https?:\/\/(localhost|127\.0\.0\.1)(?::(\d{1,5}))?/g;
+    // Strip ANSI color codes
+    const cleaned = data.replace(/\x1b\[[0-9;]*m/g, "");
 
-    let match;
-    data =data.replace(/\x1b\[[0-9;]*m/g, '')
-    while ((match = regex.exec(data)) !== null) {
-      console.log("match", match);
-      const port = match[2];
-      const token = generatePreviewToken(userId, port);
-
-      ws.send(`PREVIEW:${port}:${token}`);
-      console.log(`Dev server port=${port} for user=${userId}`);
+    // Detect when the dev server prints a localhost URL once
+    if (!previewSent && /https?:\/\/(localhost|127\.0\.0\.1)/.test(cleaned)) {
+      const port = userDevPorts[userId];
+      if (port) {
+        const token = generatePreviewToken(userId, port);
+        // PREVIEW:<port>:<token>
+        ws.send(`PREVIEW:${port}:${token}`);
+        console.log(`Dev server detected for user=${userId} on port=${port}`);
+        previewSent = true;
+      }
     }
   });
 
   // WS → PTY input
-  ws.on("message", (msg) => ptyProcess.write(msg));
+  ws.on("message", (msg) => {
+    // Ensure string
+    if (Buffer.isBuffer(msg)) {
+      ptyProcess.write(msg.toString());
+    } else {
+      ptyProcess.write(String(msg));
+    }
+  });
 
-  // Cleanup
+  // Cleanup on close
   ws.on("close", () => {
     try {
       ptyProcess.kill();
     } catch (e) {
       // ignore
     }
+
     delete session.terminals[terminalId];
+    releaseDevPortForUser(userId);
     console.log(`Terminal closed: user=${userId}, terminal=${terminalId}`);
   });
 });
@@ -333,7 +424,6 @@ vncWss.on("connection", (ws, req) => {
     } else if (typeof msg === "string") {
       tcpSocket.write(Buffer.from(msg));
     } else {
-      // ArrayBuffer etc.
       tcpSocket.write(Buffer.from(msg));
     }
   });
@@ -344,11 +434,16 @@ vncWss.on("connection", (ws, req) => {
   });
 });
 
-// ---- WEBSOCKET UPGRADE HANDLER ----
+// -------------------- HTTP SERVER UPGRADE HANDLER --------------------
+
+// IMPORTANT:
+// We only handle upgrades for /ws/terminal and /websockify/*
+// For everything else (like dev server HMR WS under /preview),
+// we let other listeners (http-proxy-middleware) handle them.
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, "http://localhost");
 
-  // Terminal WebSocket
+  // Terminal WebSocket: /ws/terminal?userId=...&terminalId=...
   if (url.pathname === "/ws/terminal") {
     const userId = url.searchParams.get("userId");
     const terminalId = url.searchParams.get("terminalId");
@@ -377,32 +472,11 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  // Anything else: reject
-  socket.destroy();
+  // Anything else: do nothing, let other listeners (like proxy) handle it.
 });
 
-// ---- SECURE REVERSE PROXY (dev server preview) ----
-app.use("/preview/:userId/:port", (req, res, next) => {
-  const { userId, port } = req.params;
-  const { token } = req.query;
+// -------------------- START SERVER --------------------
 
-  if (!token) {
-    return res.status(403).send("Missing token");
-  }
-
-  if (!verifyPreviewToken(token, userId, port)) {
-    return res.status(403).send("Invalid or expired preview token");
-  }
-
-  return createProxyMiddleware({
-    target: `http://localhost:${port}`,
-    changeOrigin: true,
-    ws: true,
-    pathRewrite: { [`^/preview/${userId}/${port}`]: "" },
-  })(req, res, next);
-});
-
-// ---- START SERVER ----
 server.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
   console.log(`Project root: ${PROJECT_ROOT}`);
