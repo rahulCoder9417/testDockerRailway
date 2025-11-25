@@ -404,6 +404,39 @@ server.on("upgrade", (req, socket, head) => {
     });
     return;
   }
+  if (url.pathname.startsWith("/preview/")) {
+    const pathParts = url.pathname.split("/");
+    const userId = pathParts[2];
+    const port = pathParts[3];
+    const token = url.searchParams.get("token");
+
+    if (!token || !verifyPreviewToken(token, userId, port)) {
+      socket.destroy();
+      return;
+    }
+
+    // Proxy the WebSocket upgrade to the dev server
+    const proxyReq = http.request({
+      hostname: "localhost",
+      port: port,
+      path: url.pathname.replace(`/preview/${userId}/${port}`, "") + url.search,
+      headers: req.headers,
+    });
+
+    proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+      socket.write("HTTP/1.1 101 Switching Protocols\r\n");
+      Object.keys(proxyRes.headers).forEach((key) => {
+        socket.write(`${key}: ${proxyRes.headers[key]}\r\n`);
+      });
+      socket.write("\r\n");
+      
+      proxySocket.pipe(socket);
+      socket.pipe(proxySocket);
+    });
+
+    proxyReq.end();
+    return;
+  }
 
 });
 
