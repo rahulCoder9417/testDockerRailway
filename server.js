@@ -243,7 +243,7 @@ app.use("/preview/:userId/:port", (req, res, next) => {
     pathRewrite: (path, req) => {
       const { userId, port } = req.params;
       const prefix = `/preview/${userId}/${port}`;
-      const newPath = path.replace(prefix, '') || '/';
+      let newPath = path.replace(prefix, '') || '/';
     // IMPORTANT: Remove the token from query string before forwarding to dev server
     newPath = newPath.replace(/[?&]token=[^&]+/, '').replace(/\?$/, '');
       
