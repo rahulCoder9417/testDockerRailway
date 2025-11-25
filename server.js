@@ -11,6 +11,26 @@ import { createProxyMiddleware } from "http-proxy-middleware";
 import { spawn } from "child_process";
 import net from "net";
 
+/**
+ * sessions structure:
+ * {
+ *   [userId]: {
+ *     terminals: {
+ *       [terminalId]: ptyInstance
+ *     },
+ *     gui?: {
+ *       display: string;      // e.g. ':101'
+ *       vncPort: number;      // e.g. 5901
+ *       index: number;        // internal index
+ *       processes: {
+ *         xvfb: ChildProcess;
+ *         x11vnc: ChildProcess;
+ *         wm?: ChildProcess;
+ *       }
+ *     }
+ *   }
+ * }
+ */
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
@@ -224,7 +244,11 @@ app.use("/preview/:userId/:port", (req, res, next) => {
       const { userId, port } = req.params;
       const prefix = `/preview/${userId}/${port}`;
       const newPath = path.replace(prefix, '') || '/';
-      console.log(`🔄 Path rewrite: ${path} → ${newPath}`);
+    // IMPORTANT: Remove the token from query string before forwarding to dev server
+    newPath = newPath.replace(/[?&]token=[^&]+/, '').replace(/\?$/, '');
+      
+    console.log(`🔄 Path rewrite: ${path} → ${newPath}`);
+   
       return newPath;
     },
     onProxyReq: (proxyReq, req, res) => {
