@@ -210,156 +210,95 @@ app.get("/gui/:userId", (req, res) => {
 });
 
 // ---- SECURE REVERSE PROXY (dev server preview) ----
+// ---- SECURE REVERSE PROXY (dev server preview) ----
 app.use("/preview/:userId/:port*", (req, res, next) => {
   const { userId, port } = req.params;
-  const token = req.query.token;
+  const { token } = req.query;
 
-  if (!token) return res.status(403).send("Missing token");
-  if (!verifyPreviewToken(token, userId, port)) {
+  console.log('\n🌐 ============ HTTP PROXY REQUEST ============');
+  console.log(`📍 Full URL: ${req.protocol}://${req.get('host')}${req.originalUrl}`);
+  console.log(`📂 Path: ${req.path}`);
+  console.log(`📂 Original URL: ${req.originalUrl}`);
+  console.log(`📂 Params[0] (wildcard): ${req.params[0]}`);
+  console.log(`👤 UserId: ${userId}`);
+  console.log(`🔌 Port: ${port}`);
+  console.log(`🎫 Token: ${token ? token.substring(0, 20) + '...' : '❌ MISSING'}`);
+  console.log(`🔧 Method: ${req.method}`);
+
+  if (!token) {
+    console.log('❌ FAILED: No token provided');
+    return res.status(403).send("Missing token");
+  }
+
+  const isValid = verifyPreviewToken(token, userId, port);
+  if (!isValid) {
+    console.log('❌ FAILED: Invalid token');
     return res.status(403).send("Invalid or expired preview token");
   }
+
+  console.log('✅ Token verified, creating proxy...');
 
   const proxy = createProxyMiddleware({
     target: `http://localhost:${port}`,
     changeOrigin: true,
     ws: true,
     selfHandleResponse: true,
-
-    // 1️⃣ Normalize path → strip /preview/:userId/:port and strip ?token=...
     pathRewrite: (path, req) => {
       const { userId, port } = req.params;
       const prefix = `/preview/${userId}/${port}`;
-      let newPath = path.replace(prefix, "");
-
-      // strip token query manually from the path string
-      newPath = newPath.replace(/[?&]token=[^&]+/, "").replace(/\?$/, "");
-
-      if (!newPath) newPath = "/";
+      
+      let newPath = path.replace(prefix, '').replace(/[?&]token=[^&]+/, '').replace(/\?$/, '') || '/';
+      
       console.log(`🔄 Path rewrite: ${path} → ${newPath}`);
       return newPath;
     },
-
-    // 2️⃣ Make sure we always get a *real* body (no gzip, no 304)
-    onProxyReq(proxyReq, req, res) {
-      // disable gzip so we can read plain text
-      proxyReq.removeHeader("accept-encoding");
-      // disable cache validation → avoid 304 Not Modified (no body to rewrite)
-      proxyReq.removeHeader("if-none-match");
-      proxyReq.removeHeader("if-modified-since");
+    onProxyReq: (proxyReq, req, res) => {
       console.log(`➡️  Proxying to: http://localhost:${port}${proxyReq.path}`);
     },
-
-    // 3️⃣ Intercept responses and rewrite HTML + JS bodies
-    onProxyRes(proxyRes, req, res) {
-      const contentType = proxyRes.headers["content-type"] || "";
-      console.log(
-        `⬅️  Response received: ${proxyRes.statusCode} ${proxyRes.statusMessage}`
-      );
-      console.log(`📄 Content-Type: ${contentType}`);
-
-      const isHtml = contentType.includes("text/html");
-      const isJs =
-        contentType.includes("application/javascript") ||
-        contentType.includes("text/javascript") ||
-        contentType.includes("javascript+module") ||
-        contentType.includes("module");
-
-      // If it's neither HTML nor JS → just stream it straight through
-      if (!isHtml && !isJs) {
-        res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
-        proxyRes.pipe(res);
-        return;
-      }
-
-      console.log(
-        `✏️  Intercepting ${isHtml ? "HTML" : "JS"} response for rewrite`
-      );
-
-      let body = "";
-      proxyRes.on("data", (chunk) => {
-        body += chunk.toString("utf8");
-      });
-
-      proxyRes.on("end", () => {
-        const { userId, port } = req.params;
-        const token = req.query.token || "";
-        const baseUrl = `/preview/${userId}/${port}`;
-
-        // ---- HTML REWRITE ----
-        if (isHtml) {
-          // src="/..." or href="/..."
+    onProxyRes: (proxyRes, req, res) => {
+      console.log(`⬅️  Response received: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
+      console.log(`📄 Content-Type: ${proxyRes.headers['content-type']}`);
+      
+      const contentType = proxyRes.headers['content-type'] || '';
+      
+      if (contentType.includes('text/html')) {
+        console.log('🔧 Modifying HTML response...');
+        
+        let body = '';
+        proxyRes.on('data', (chunk) => {
+          body += chunk.toString('utf8');
+        });
+        
+        proxyRes.on('end', () => {
+          const baseUrl = `/preview/${userId}/${port}`;
+          
+          // Rewrite all absolute URLs: src="/..." and href="/..."
           body = body.replace(
             /((?:src|href))="\/([^"]*)"/g,
             `$1="${baseUrl}/$2?token=${token}"`
           );
-
-          // modulepreload link tags
-          body = body.replace(
-            /<link\s+rel="modulepreload"\s+href="\/([^"]*)"/g,
-            `<link rel="modulepreload" href="${baseUrl}/$1?token=${token}"`
-          );
-
-          console.log("✅ HTML URLs rewritten");
-        }
-
-        // ---- JS REWRITE ----
-        if (isJs) {
-          // import "/foo"
-          body = body.replace(
-            /import\s+(['"])\s*\/([^'"]*)\1/g,
-            (_m, quote, spec) =>
-              `import ${quote}${baseUrl}/${spec}?token=${token}${quote}`
-          );
-
-          // dynamic import("/foo")
-          body = body.replace(
-            /import\(\s*(['"])\s*\/([^'"]*)\1\s*\)/g,
-            (_m, quote, spec) =>
-              `import(${quote}${baseUrl}/${spec}?token=${token}${quote})`
-          );
-
-          // export ... from "/foo"
-          body = body.replace(
-            /export\s+([^'"]*?)\s+from\s+(['"])\s*\/([^'"]*)\2/g,
-            (_m, what, quote, spec) =>
-              `export ${what} from ${quote}${baseUrl}/${spec}?token=${token}${quote}`
-          );
-
-          // Very common in Vite client code: bare absolute HMR URL
-          body = body.replace(
-            /new WebSocket\(\s*(['"])ws:\/\/localhost:(\d+)\/([^'"]*)\1\s*\)/g,
-            (_m, quote, devPort, hmrPath) =>
-              `new WebSocket(${quote}ws://"+location.host+"${baseUrl}/${hmrPath}?token=${token}${quote})`
-          );
-
-          console.log("✅ JS import/export URLs rewritten");
-        }
-
-        // We changed the body → kill length & encoding so Node recalculates
-        const headers = { ...proxyRes.headers };
-        delete headers["content-length"];
-        delete headers["Content-Length"];
-        delete headers["content-encoding"];
-        delete headers["Content-Encoding"];
-
-        res.writeHead(proxyRes.statusCode || 200, headers);
-        res.end(body);
-      });
-    },
-
-    onError(err, req, res) {
-      console.error("❌ PROXY ERROR:", err.message);
-      if (!res.headersSent) {
-        res
-          .status(502)
-          .send(`<h1>Proxy Error</h1><pre>${err.message}</pre>`);
+          
+          console.log('✅ HTML URLs rewritten (no base tag)');
+          
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(body);
+        });
+      } else {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
       }
+    },
+    onError: (err, req, res) => {
+      console.error('❌ ============ PROXY ERROR ============');
+      console.error(`🔴 Error: ${err.message}`);
+      console.error(`🔴 Code: ${err.code}`);
+      console.error(`🔴 Target: http://localhost:${port}`);
+      res.status(502).send(`<h1>Proxy Error</h1><p>${err.message}</p>`);
     },
   });
 
   return proxy(req, res, next);
 });
-
 
 // ---- WEBSOCKET + PTY (code runner) ----
 const wss = new WebSocketServer({ noServer: true });
