@@ -273,6 +273,12 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
             `$1="${baseUrl}/$2?token=${token}"`
           );
           
+          // Also rewrite relative URLs in CSS/JS that reference images
+          body = body.replace(
+            /(url\(['"]?)(\/[^'")]+)(['"]?\))/g,
+            `$1${baseUrl}$2?token=${token}$3`
+          );
+          
           console.log('✅ HTML URLs rewritten');
           
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
@@ -335,26 +341,21 @@ wss.on("connection", (ws, req) => {
       /started.*?(?:on|at).*?:(\d{4,5})/i,
       /ready.*?(?:on|at).*?:(\d{4,5})/i,
       /serving.*?(?:on|at).*?:(\d{4,5})/i,
+      /https?:\/\/(localhost|127\.0\.0\.1):(\d{4,5})/i,
     ];
 
     let detectedPort = null;
     for (const pattern of productionPatterns) {
       const match = cleanData.match(pattern);
       if (match) {
-        detectedPort = match[1];
+        // Get the port from either capture group 1 or 2 (depending on pattern)
+        detectedPort = match[2] || match[1];
         break;
       }
     }
 
-    // Also detect localhost URLs
-    const urlRegex = /https?:\/\/(localhost|127\.0\.0\.1):(\d{4,5})/g;
-    let urlMatch;
-    while ((urlMatch = urlRegex.exec(cleanData)) !== null) {
-      detectedPort = urlMatch[2];
-      break;
-    }
-
-    if (detectedPort) {
+    // Only generate preview if we haven't already for this port
+    if (detectedPort && !session.previews[detectedPort]) {
       console.log("🚀 Production server detected on port:", detectedPort);
       const token = generatePreviewToken(userId, detectedPort);
       
