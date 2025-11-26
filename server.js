@@ -270,16 +270,15 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
         });
         
         proxyRes.on('end', () => {
-          // NO trailing slash before ?
-          const baseUrl = `/preview/${userId}/${port}?token=${token}`;
-          const baseTag = `<base href="${baseUrl}">`;
+          const baseUrl = `/preview/${userId}/${port}`;
           
-          if (body.includes('<head>')) {
-            body = body.replace('<head>', `<head>\n  ${baseTag}`);
-            console.log(`✅ Base tag injected: ${baseTag}`);
-          } else {
-            console.log('⚠️  Warning: No <head> tag found');
-          }
+          // Rewrite all absolute URLs: src="/..." and href="/..."
+          body = body.replace(
+            /((?:src|href))="\/([^"]*)"/g,
+            `$1="${baseUrl}/$2?token=${token}"`
+          );
+          
+          console.log('✅ HTML URLs rewritten (no base tag)');
           
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(body);
