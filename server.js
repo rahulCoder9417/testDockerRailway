@@ -210,7 +210,7 @@ app.get("/gui/:userId", (req, res) => {
 });
 
 // ---- SECURE REVERSE PROXY (dev server preview) ----
-app.use("/preview/:userId/:port", (req, res, next) => {
+app.use("/preview/:userId/:port*", (req, res, next) => {
   const { userId, port } = req.params;
   const { token } = req.query;
 
