@@ -218,6 +218,8 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
   console.log('\n🌐 ============ HTTP PROXY REQUEST ============');
   console.log(`📍 Full URL: ${req.protocol}://${req.get('host')}${req.originalUrl}`);
   console.log(`📂 Path: ${req.path}`);
+  console.log(`📂 Original URL: ${req.originalUrl}`);
+  console.log(`📂 Params[0] (wildcard): ${req.params[0]}`);
   console.log(`👤 UserId: ${userId}`);
   console.log(`🔌 Port: ${port}`);
   console.log(`🎫 Token: ${token ? token.substring(0, 20) + '...' : '❌ MISSING'}`);
@@ -240,12 +242,11 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
     target: `http://localhost:${port}`,
     changeOrigin: true,
     ws: true,
-    selfHandleResponse: true, // We'll manually handle HTML responses
+    selfHandleResponse: true,
     pathRewrite: (path, req) => {
       const { userId, port } = req.params;
       const prefix = `/preview/${userId}/${port}`;
       
-      // Remove prefix and token, default to '/'
       let newPath = path.replace(prefix, '').replace(/[?&]token=[^&]+/, '').replace(/\?$/, '') || '/';
       
       console.log(`🔄 Path rewrite: ${path} → ${newPath}`);
@@ -260,7 +261,6 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
       
       const contentType = proxyRes.headers['content-type'] || '';
       
-      // If it's HTML, inject base tag
       if (contentType.includes('text/html')) {
         console.log('🔧 Modifying HTML response...');
         
@@ -270,23 +270,21 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
         });
         
         proxyRes.on('end', () => {
-          // Inject base tag
-          const baseUrl = `/preview/${userId}/${port}/?token=${token}`;
+          // NO trailing slash before ?
+          const baseUrl = `/preview/${userId}/${port}?token=${token}`;
           const baseTag = `<base href="${baseUrl}">`;
           
           if (body.includes('<head>')) {
             body = body.replace('<head>', `<head>\n  ${baseTag}`);
-            console.log('✅ Base tag injected');
+            console.log(`✅ Base tag injected: ${baseTag}`);
           } else {
             console.log('⚠️  Warning: No <head> tag found');
           }
           
-          // Send modified HTML
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(body);
         });
       } else {
-        // For non-HTML, just pipe through
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
       }
@@ -296,11 +294,7 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
       console.error(`🔴 Error: ${err.message}`);
       console.error(`🔴 Code: ${err.code}`);
       console.error(`🔴 Target: http://localhost:${port}`);
-      res.status(502).send(`
-        <h1>Proxy Error</h1>
-        <p><strong>Error:</strong> ${err.message}</p>
-        <p><strong>Target:</strong> http://localhost:${port}</p>
-      `);
+      res.status(502).send(`<h1>Proxy Error</h1><p>${err.message}</p>`);
     },
   });
 
