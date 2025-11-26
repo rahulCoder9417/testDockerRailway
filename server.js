@@ -210,6 +210,7 @@ app.get("/gui/:userId", (req, res) => {
 });
 
 // ---- SECURE REVERSE PROXY (dev server preview) ----
+// ---- SECURE REVERSE PROXY (dev server preview) ----
 app.use("/preview/:userId/:port*", (req, res, next) => {
   const { userId, port } = req.params;
   const { token } = req.query;
@@ -221,7 +222,6 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
   console.log(`🔌 Port: ${port}`);
   console.log(`🎫 Token: ${token ? token.substring(0, 20) + '...' : '❌ MISSING'}`);
   console.log(`🔧 Method: ${req.method}`);
-  console.log(`📨 Headers:`, JSON.stringify(req.headers, null, 2));
 
   if (!token) {
     console.log('❌ FAILED: No token provided');
@@ -240,18 +240,15 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
     target: `http://localhost:${port}`,
     changeOrigin: true,
     ws: true,
+    selfHandleResponse: true, // We'll manually handle HTML responses
     pathRewrite: (path, req) => {
       const { userId, port } = req.params;
       const prefix = `/preview/${userId}/${port}`;
-      let newPath = path.replace(prefix, '') || '/';
-    // IMPORTANT: Remove the token from query string before forwarding to dev server
-    newPath = newPath.replace(/[?&]token=[^&]+/, '').replace(/\?$/, '');
-        // If empty, default to '/'
-  if (!newPath) {
-    newPath = '/';
-  }
-    console.log(`🔄 Path rewrite: ${path} → ${newPath}`);
-   
+      
+      // Remove prefix and token, default to '/'
+      let newPath = path.replace(prefix, '').replace(/[?&]token=[^&]+/, '').replace(/\?$/, '') || '/';
+      
+      console.log(`🔄 Path rewrite: ${path} → ${newPath}`);
       return newPath;
     },
     onProxyReq: (proxyReq, req, res) => {
@@ -260,23 +257,49 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
     onProxyRes: (proxyRes, req, res) => {
       console.log(`⬅️  Response received: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
       console.log(`📄 Content-Type: ${proxyRes.headers['content-type']}`);
+      
+      const contentType = proxyRes.headers['content-type'] || '';
+      
+      // If it's HTML, inject base tag
+      if (contentType.includes('text/html')) {
+        console.log('🔧 Modifying HTML response...');
+        
+        let body = '';
+        proxyRes.on('data', (chunk) => {
+          body += chunk.toString('utf8');
+        });
+        
+        proxyRes.on('end', () => {
+          // Inject base tag
+          const baseUrl = `/preview/${userId}/${port}/?token=${token}`;
+          const baseTag = `<base href="${baseUrl}">`;
+          
+          if (body.includes('<head>')) {
+            body = body.replace('<head>', `<head>\n  ${baseTag}`);
+            console.log('✅ Base tag injected');
+          } else {
+            console.log('⚠️  Warning: No <head> tag found');
+          }
+          
+          // Send modified HTML
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(body);
+        });
+      } else {
+        // For non-HTML, just pipe through
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
+      }
     },
     onError: (err, req, res) => {
       console.error('❌ ============ PROXY ERROR ============');
       console.error(`🔴 Error: ${err.message}`);
       console.error(`🔴 Code: ${err.code}`);
       console.error(`🔴 Target: http://localhost:${port}`);
-      console.error(`💡 Is dev server running on port ${port}?`);
       res.status(502).send(`
         <h1>Proxy Error</h1>
         <p><strong>Error:</strong> ${err.message}</p>
         <p><strong>Target:</strong> http://localhost:${port}</p>
-        <p><strong>Possible causes:</strong></p>
-        <ul>
-          <li>Dev server is not running on port ${port}</li>
-          <li>Dev server crashed</li>
-          <li>Port ${port} is used by another process</li>
-        </ul>
       `);
     },
   });
