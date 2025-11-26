@@ -246,7 +246,10 @@ app.use("/preview/:userId/:port", (req, res, next) => {
       let newPath = path.replace(prefix, '') || '/';
     // IMPORTANT: Remove the token from query string before forwarding to dev server
     newPath = newPath.replace(/[?&]token=[^&]+/, '').replace(/\?$/, '');
-      
+        // If empty, default to '/'
+  if (!newPath) {
+    newPath = '/';
+  }
     console.log(`🔄 Path rewrite: ${path} → ${newPath}`);
    
       return newPath;
