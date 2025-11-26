@@ -28,23 +28,8 @@ const GUI_BASE_DISPLAY = 100;
 const GUI_BASE_VNC_PORT = 5900;
 let nextGuiIndex = 1;
 
-// ---- PORT MANAGER ----
-const PREVIEW_PORT_RANGE = { min: 4000, max: 4100 };
-const allocatedPorts = new Set();
 
-function findFreePort() {
-  for (let port = PREVIEW_PORT_RANGE.min; port <= PREVIEW_PORT_RANGE.max; port++) {
-    if (!allocatedPorts.has(port)) {
-      allocatedPorts.add(port);
-      return port;
-    }
-  }
-  throw new Error("No free ports available in range");
-}
 
-function releasePort(port) {
-  allocatedPorts.delete(port);
-}
 
 // ---- TOKEN GENERATION ----
 function generatePreviewToken(userId, port) {
@@ -252,10 +237,11 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
     onProxyRes: (proxyRes, req, res) => {
       console.log(`⬅️  Response received: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
       console.log(`📄 Content-Type: ${proxyRes.headers['content-type']}`);
+      console.log(`📂 Request path: ${req.path}`);  // ✅ NEW: Log request path
       
       const contentType = proxyRes.headers['content-type'] || '';
       
-      // Only rewrite HTML for production builds
+      // Rewrite HTML
       if (contentType.includes('text/html')) {
         console.log('🔧 Modifying HTML response...');
         
@@ -267,16 +253,24 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
         proxyRes.on('end', () => {
           const baseUrl = `/preview/${userId}/${port}`;
           
-          // Rewrite absolute URLs for production builds
+          console.log('📝 Original HTML length:', body.length);  // ✅ NEW: Log HTML size
+          
+          // Rewrite absolute URLs in HTML attributes
           body = body.replace(
-            /((?:src|href))="\/([^"]*)"/g,
-            `$1="${baseUrl}/$2?token=${token}"`
+            /((?:src|href|srcset))="\/([^"]*)"/g,  // ✅ CHANGED: Added 'srcset'
+            (match, attr, path) => {
+              console.log(`  Rewriting ${attr}="/${path}" → ${attr}="${baseUrl}/${path}?token=${token}"`);  // ✅ NEW: Log each rewrite
+              return `${attr}="${baseUrl}/${path}?token=${token}"`;
+            }
           );
           
-          // Also rewrite relative URLs in CSS/JS that reference images
+          // Rewrite CSS url() - inline styles
           body = body.replace(
             /(url\(['"]?)(\/[^'")]+)(['"]?\))/g,
-            `$1${baseUrl}$2?token=${token}$3`
+            (match, prefix, path, suffix) => {
+              console.log(`  Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);  // ✅ NEW: Log each rewrite
+              return `${prefix}${baseUrl}${path}?token=${token}${suffix}`;
+            }
           );
           
           console.log('✅ HTML URLs rewritten');
@@ -284,7 +278,37 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(body);
         });
-      } else {
+      } 
+      // ✅ NEW BLOCK: Rewrite CSS files
+      else if (contentType.includes('text/css')) {
+        console.log('🎨 Modifying CSS response...');
+        
+        let body = '';
+        proxyRes.on('data', (chunk) => {
+          body += chunk.toString('utf8');
+        });
+        
+        proxyRes.on('end', () => {
+          const baseUrl = `/preview/${userId}/${port}`;
+          
+          // Rewrite url() in CSS
+          body = body.replace(
+            /url\(['"]?(\/[^'")]+)['"]?\)/g,
+            (match, path) => {
+              console.log(`  CSS: Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);
+              return `url(${baseUrl}${path}?token=${token})`;
+            }
+          );
+          
+          console.log('✅ CSS URLs rewritten');
+          
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(body);
+        });
+      }
+      // Pass through everything else (images, JS, fonts, etc.)
+      else {
+        console.log('📦 Passing through:', contentType);  // ✅ NEW: Log pass-through
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
       }
@@ -308,15 +332,16 @@ const vncWss = new WebSocketServer({ noServer: true });
 wss.on("connection", (ws, req) => {
   const userId = req.userId;
   const terminalId = req.terminalId;
-
+//add condition
+// ✅ NEW: Create GUI session when user opens any terminal
+const gui = ensureGuiSession(userId);
+console.log(`🖼️  GUI session assigned: DISPLAY=${gui.display} VNC=:${gui.vncPort} for user=${userId}`);
   console.log(`🖥️  Terminal WS connected: user=${userId}, terminal=${terminalId}`);
 
-  const session = getUserSession(userId);
-
-  let env = { ...process.env };
-  if (session.gui && session.gui.display) {
-    env.DISPLAY = session.gui.display;
-  }
+  let session = getUserSession(userId);
+  session.gui = gui;
+ // ✅ Simplified: Always set DISPLAY (no if-check needed)
+let env = { ...process.env, DISPLAY: gui.display };
 
   const ptyProcess = pty.spawn("bash", [], {
     name: "xterm-color",
@@ -561,9 +586,7 @@ server.listen(PORT, () => {
   console.log(`\n🚀 ============ SERVER STARTED ============`);
   console.log(`📡 Port: ${PORT}`);
   console.log(`📂 Project root: ${PROJECT_ROOT}`);
-  console.log(`🔌 Preview port range: ${PREVIEW_PORT_RANGE.min}-${PREVIEW_PORT_RANGE.max}`);
-  console.log(`🔐 Preview secret: ${process.env.PREVIEW_SECRET ? 'Set from env' : 'Using default "supersecret"'}`);
-  console.log(`\n📝 USAGE INSTRUCTIONS:`);
+ console.log(`\n📝 USAGE INSTRUCTIONS:`);
   console.log(`   1. Build your app: npm run build`);
   console.log(`   2. Start production server: npm start`);
   console.log(`   3. Preview will be detected automatically`);

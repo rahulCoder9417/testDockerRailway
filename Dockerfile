@@ -34,9 +34,17 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # =====================================================================
-# 4. Install Python3 + pip
+# 4. Install Python3 + pip + Tkinter
 # =====================================================================
-RUN apt-get update && apt-get install -y python3 python3-pip \
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    \
+    # --- Tkinter (Python GUI) ---
+    python3-tk \
+    tk \
+    tcl \
+    \
     && rm -rf /var/lib/apt/lists/*
 
 # =====================================================================
