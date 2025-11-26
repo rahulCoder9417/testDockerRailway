@@ -1,4 +1,3 @@
-// server.mjs
 import express from "express";
 import http from "http";
 import { WebSocketServer } from "ws";
@@ -12,12 +11,12 @@ import { createProxyMiddleware } from "http-proxy-middleware";
 import { spawn } from "child_process";
 import net from "net";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const sessions = {};
 
@@ -28,6 +27,24 @@ const PROJECT_ROOT = path.join(__dirname, "projects", "sample");
 const GUI_BASE_DISPLAY = 100;
 const GUI_BASE_VNC_PORT = 5900;
 let nextGuiIndex = 1;
+
+// ---- PORT MANAGER ----
+const PREVIEW_PORT_RANGE = { min: 4000, max: 4100 };
+const allocatedPorts = new Set();
+
+function findFreePort() {
+  for (let port = PREVIEW_PORT_RANGE.min; port <= PREVIEW_PORT_RANGE.max; port++) {
+    if (!allocatedPorts.has(port)) {
+      allocatedPorts.add(port);
+      return port;
+    }
+  }
+  throw new Error("No free ports available in range");
+}
+
+function releasePort(port) {
+  allocatedPorts.delete(port);
+}
 
 // ---- TOKEN GENERATION ----
 function generatePreviewToken(userId, port) {
@@ -44,7 +61,7 @@ function verifyPreviewToken(token, userId, port) {
     .digest("hex");
 
   console.log(`🔐 Token verification: userId=${userId}, port=${port}`);
-  console.log(`   Received token: ${token ? token.substring(0, 20) + "..." : "MISSING"}`);
+  console.log(`   Received token: ${token}`);
   console.log(`   Expected token: ${recalculated}`);
   console.log(`   Match: ${recalculated === token}`);
 
@@ -54,7 +71,7 @@ function verifyPreviewToken(token, userId, port) {
 // Helper: get or create user session
 function getUserSession(userId) {
   if (!sessions[userId]) {
-    sessions[userId] = { terminals: {}, gui: null };
+    sessions[userId] = { terminals: {}, gui: null, previews: {} };
   }
   return sessions[userId];
 }
@@ -190,44 +207,89 @@ app.get("/gui/:userId", (req, res) => {
   res.redirect(url);
 });
 
-// ---- SECURE PREVIEW HTTP PROXY (production server only) ----
+// ---- SECURE REVERSE PROXY (PRODUCTION BUILD PREVIEW) ----
 app.use("/preview/:userId/:port*", (req, res, next) => {
   const { userId, port } = req.params;
   const { token } = req.query;
 
-  console.log('\n🌐 ============ HTTP PREVIEW REQUEST ============');
+  console.log('\n🌐 ============ HTTP PROXY REQUEST ============');
   console.log(`📍 Full URL: ${req.protocol}://${req.get('host')}${req.originalUrl}`);
+  console.log(`📂 Path: ${req.path}`);
   console.log(`👤 UserId: ${userId}`);
   console.log(`🔌 Port: ${port}`);
   console.log(`🎫 Token: ${token ? token.substring(0, 20) + '...' : '❌ MISSING'}`);
-  console.log(`🔧 Method: ${req.method}`);
 
   if (!token) {
-    console.log("❌ Missing token (HTTP)");
+    console.log('❌ FAILED: No token provided');
     return res.status(403).send("Missing token");
   }
 
-  if (!verifyPreviewToken(token, userId, port)) {
-    console.log("❌ Invalid token (HTTP)");
+  const isValid = verifyPreviewToken(token, userId, port);
+  if (!isValid) {
+    console.log('❌ FAILED: Invalid token');
     return res.status(403).send("Invalid or expired preview token");
   }
+
+  console.log('✅ Token verified, creating proxy...');
 
   const proxy = createProxyMiddleware({
     target: `http://localhost:${port}`,
     changeOrigin: true,
     ws: true,
-    pathRewrite: (path) => {
+    selfHandleResponse: true,
+    pathRewrite: (path, req) => {
+      const { userId, port } = req.params;
       const prefix = `/preview/${userId}/${port}`;
-      const newPath = path.replace(prefix, "");
-      return newPath || "/";
+      
+      let newPath = path.replace(prefix, '').replace(/[?&]token=[^&]+/, '').replace(/\?$/, '') || '/';
+      
+      console.log(`🔄 Path rewrite: ${path} → ${newPath}`);
+      return newPath;
     },
-    onError: (err, req, res) => {
-      console.error("Preview proxy error (HTTP):", err && err.message);
-      if (!res.headersSent) {
-        res.status(502).send("Preview server unavailable");
+    onProxyReq: (proxyReq, req, res) => {
+      console.log(`➡️  Proxying to: http://localhost:${port}${proxyReq.path}`);
+    },
+    onProxyRes: (proxyRes, req, res) => {
+      console.log(`⬅️  Response received: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
+      console.log(`📄 Content-Type: ${proxyRes.headers['content-type']}`);
+      
+      const contentType = proxyRes.headers['content-type'] || '';
+      
+      // Only rewrite HTML for production builds
+      if (contentType.includes('text/html')) {
+        console.log('🔧 Modifying HTML response...');
+        
+        let body = '';
+        proxyRes.on('data', (chunk) => {
+          body += chunk.toString('utf8');
+        });
+        
+        proxyRes.on('end', () => {
+          const baseUrl = `/preview/${userId}/${port}`;
+          
+          // Rewrite absolute URLs for production builds
+          body = body.replace(
+            /((?:src|href))="\/([^"]*)"/g,
+            `$1="${baseUrl}/$2?token=${token}"`
+          );
+          
+          console.log('✅ HTML URLs rewritten');
+          
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(body);
+        });
+      } else {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
       }
     },
-    logLevel: "silent",
+    onError: (err, req, res) => {
+      console.error('❌ ============ PROXY ERROR ============');
+      console.error(`🔴 Error: ${err.message}`);
+      console.error(`🔴 Code: ${err.code}`);
+      console.error(`🔴 Target: http://localhost:${port}`);
+      res.status(502).send(`<h1>Proxy Error</h1><p>${err.message}</p><p>Make sure your app is built and running with 'npm start'</p>`);
+    },
   });
 
   return proxy(req, res, next);
@@ -250,11 +312,10 @@ wss.on("connection", (ws, req) => {
     env.DISPLAY = session.gui.display;
   }
 
-  // spawn a shell PTY for the user (cwd set to project root)
   const ptyProcess = pty.spawn("bash", [], {
     name: "xterm-color",
-    cols: 120,
-    rows: 30,
+    cols: 80,
+    rows: 25,
     cwd: PROJECT_ROOT,
     env,
   });
@@ -262,38 +323,55 @@ wss.on("connection", (ws, req) => {
   session.terminals[terminalId] = ptyProcess;
 
   ptyProcess.on("data", (data) => {
-    // send raw terminal data to frontend
     ws.send(data);
 
-    // CLEAN terminal text for detection
-    const clean = data.toString().replace(/\x1b\[[0-9;]*m/g, "");
+    // Clean ANSI codes for detection
+    const cleanData = data.replace(/\x1b\[[0-9;]*m/g, '');
+    
+    // Detect production server patterns (Express, serve, http-server, etc.)
+    const productionPatterns = [
+      /listening on.*?(?:port\s*)?(\d{4,5})/i,
+      /server.*?(?:running|started).*?(?:port\s*)?(\d{4,5})/i,
+      /started.*?(?:on|at).*?:(\d{4,5})/i,
+      /ready.*?(?:on|at).*?:(\d{4,5})/i,
+      /serving.*?(?:on|at).*?:(\d{4,5})/i,
+    ];
 
-    // Detect patterns like "http://localhost:3000" or "localhost:3000" or "127.0.0.1:3000"
-    const regex = /(https?:\/\/)?(localhost|127\.0\.0\.1):(\d{2,5})/g;
-    let match;
-    while ((match = regex.exec(clean)) !== null) {
-      const detectedPort = match[3];
-      console.log("🚀 Dev/Prod server detected in terminal output:", match[0]);
-      const token = generatePreviewToken(userId, detectedPort);
-
-      // Inform the frontend that a preview is available (frontend should open /preview/<userId>/<port>?token=...)
-      try {
-        ws.send(`PREVIEW:${detectedPort}:${token}`);
-        console.log(`✅ Preview token emitted for user=${userId}, port=${detectedPort}`);
-      } catch (e) {
-        console.error("Failed to send preview message over WS:", e);
+    let detectedPort = null;
+    for (const pattern of productionPatterns) {
+      const match = cleanData.match(pattern);
+      if (match) {
+        detectedPort = match[1];
+        break;
       }
     }
-  });
 
-  ws.on("message", (msg) => {
-    // write input back to PTY
-    try {
-      ptyProcess.write(msg);
-    } catch (e) {
-      console.error("Error writing to pty:", e);
+    // Also detect localhost URLs
+    const urlRegex = /https?:\/\/(localhost|127\.0\.0\.1):(\d{4,5})/g;
+    let urlMatch;
+    while ((urlMatch = urlRegex.exec(cleanData)) !== null) {
+      detectedPort = urlMatch[2];
+      break;
+    }
+
+    if (detectedPort) {
+      console.log("🚀 Production server detected on port:", detectedPort);
+      const token = generatePreviewToken(userId, detectedPort);
+      
+      // Store preview info
+      session.previews[detectedPort] = {
+        port: detectedPort,
+        token,
+        startedAt: new Date(),
+      };
+
+      ws.send(`\n\n✅ Preview ready! Your app is running on port ${detectedPort}\n`);
+      ws.send(`PREVIEW:${detectedPort}:${token}\n`);
+      console.log(`✅ Preview URL generated: port=${detectedPort} for user=${userId}`);
     }
   });
+
+  ws.on("message", (msg) => ptyProcess.write(msg));
 
   ws.on("close", () => {
     try {
@@ -306,7 +384,6 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-// VNC websocket proxy: websockify behavior - tunnel WS to TCP VNC
 vncWss.on("connection", (ws, req) => {
   const url = new URL(req.url, "http://localhost");
   const [, , encodedUserId] = url.pathname.split("/");
@@ -316,7 +393,7 @@ vncWss.on("connection", (ws, req) => {
   const gui = session && session.gui;
   if (!gui || !gui.vncPort) {
     console.error("No GUI session or VNC port for user:", userId);
-    try { ws.close(); } catch {}
+    ws.close();
     return;
   }
 
@@ -325,15 +402,21 @@ vncWss.on("connection", (ws, req) => {
 
   tcpSocket.on("error", (err) => {
     console.error("VNC TCP error:", err);
-    try { ws.close(); } catch {}
+    try {
+      ws.close();
+    } catch {}
   });
 
   tcpSocket.on("close", () => {
-    try { ws.close(); } catch {}
+    try {
+      ws.close();
+    } catch {}
   });
 
   ws.on("close", () => {
-    try { tcpSocket.end(); } catch {}
+    try {
+      tcpSocket.end();
+    } catch {}
   });
 
   ws.on("message", (msg) => {
@@ -358,7 +441,6 @@ server.on("upgrade", (req, socket, head) => {
   console.log('\n⬆️  ============ WEBSOCKET UPGRADE ============');
   console.log(`📍 URL: ${req.url}`);
   console.log(`📂 Pathname: ${url.pathname}`);
-  console.log(`🔧 Headers:`, JSON.stringify(req.headers, null, 2));
 
   // Terminal WebSocket
   if (url.pathname === "/ws/terminal") {
@@ -392,12 +474,12 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  // Preview WebSocket proxy (for production server ws connections)
+  // Preview WebSocket (for Express apps with WebSocket support)
   if (url.pathname.startsWith("/preview/")) {
     console.log('✅ Matched: Preview WebSocket');
     const pathParts = url.pathname.split("/");
     const userId = pathParts[2];
-    const port = Number(pathParts[3]);
+    const port = pathParts[3];
     const token = url.searchParams.get("token");
 
     console.log(`👤 UserId: ${userId}`);
@@ -410,55 +492,49 @@ server.on("upgrade", (req, socket, head) => {
       return;
     }
 
-    if (!verifyPreviewToken(token, userId, port)) {
+    const isValid = verifyPreviewToken(token, userId, port);
+    if (!isValid) {
       console.log('❌ Invalid token for WebSocket upgrade');
       socket.destroy();
       return;
     }
 
-    console.log('✅ Token verified, creating WebSocket proxy to production server...');
+    console.log('✅ Token verified, creating WebSocket proxy...');
 
     const pathAfterPort = "/" + pathParts.slice(4).join("/");
     const rewrittenPath = (pathAfterPort === "/" ? "" : pathAfterPort) + url.search;
-
+    
     console.log(`🔄 Path rewrite: ${url.pathname} → ${rewrittenPath || '/'}`);
     console.log(`➡️  Connecting to: localhost:${port}${rewrittenPath || '/'}`);
 
     const proxyReq = http.request({
       hostname: "localhost",
-      port: port,
-      path: rewrittenPath || "/",
+      port: parseInt(port),
+      path: rewrittenPath || '/',
       headers: req.headers,
     });
 
     proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
-      try {
-        socket.write("HTTP/1.1 101 Switching Protocols\r\n");
-        Object.keys(proxyRes.headers).forEach((key) => {
-          const value = proxyRes.headers[key];
-          if (Array.isArray(value)) {
-            value.forEach((v) => socket.write(`${key}: ${v}\r\n`));
-          } else {
-            socket.write(`${key}: ${value}\r\n`);
-          }
-        });
-        socket.write("\r\n");
-      } catch (e) {
-        console.error("Error writing upgrade response headers:", e);
-      }
+      console.log('✅ Server accepted WebSocket upgrade');
 
-      console.log('✅ WebSocket upgrade accepted by target server - piping sockets');
+      socket.write("HTTP/1.1 101 Switching Protocols\r\n");
+      Object.keys(proxyRes.headers).forEach((key) => {
+        socket.write(`${key}: ${proxyRes.headers[key]}\r\n`);
+      });
+      socket.write("\r\n");
+      
+      console.log('✅ Pipes established - WebSocket is live!');
 
       proxySocket.on("error", (err) => {
-        console.error("❌ ProxySocket error:", err && err.message);
+        console.error("❌ ProxySocket error:", err.message);
         try { socket.destroy(); } catch {}
       });
-
+      
       socket.on("error", (err) => {
-        console.error("❌ Client socket error:", err && err.message);
+        console.error("❌ Client socket error:", err.message);
         try { proxySocket.destroy(); } catch {}
       });
-
+      
       proxySocket.pipe(socket);
       socket.pipe(proxySocket);
     });
@@ -468,15 +544,14 @@ server.on("upgrade", (req, socket, head) => {
       console.error(`🔴 Error: ${err.message}`);
       console.error(`🔴 Code: ${err.code}`);
       console.error(`🔴 Target: localhost:${port}${rewrittenPath || '/'}`);
-      console.error(`💡 Is the production server running on port ${port}?`);
-      try { socket.destroy(); } catch {}
+      socket.destroy();
     });
 
     proxyReq.end();
     return;
   }
 
-  console.log('❌ No matching WebSocket route - destroying socket');
+  console.log('❌ No matching WebSocket route');
   socket.destroy();
 });
 
@@ -485,6 +560,11 @@ server.listen(PORT, () => {
   console.log(`\n🚀 ============ SERVER STARTED ============`);
   console.log(`📡 Port: ${PORT}`);
   console.log(`📂 Project root: ${PROJECT_ROOT}`);
+  console.log(`🔌 Preview port range: ${PREVIEW_PORT_RANGE.min}-${PREVIEW_PORT_RANGE.max}`);
   console.log(`🔐 Preview secret: ${process.env.PREVIEW_SECRET ? 'Set from env' : 'Using default "supersecret"'}`);
+  console.log(`\n📝 USAGE INSTRUCTIONS:`);
+  console.log(`   1. Build your app: npm run build`);
+  console.log(`   2. Start production server: npm start`);
+  console.log(`   3. Preview will be detected automatically`);
   console.log(`============================================\n`);
 });
