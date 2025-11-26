@@ -261,6 +261,7 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
       
       const contentType = proxyRes.headers['content-type'] || '';
       
+      // Handle HTML
       if (contentType.includes('text/html')) {
         console.log('🔧 Modifying HTML response...');
         
@@ -278,12 +279,51 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
             `$1="${baseUrl}/$2?token=${token}"`
           );
           
-          console.log('✅ HTML URLs rewritten (no base tag)');
+          console.log('✅ HTML URLs rewritten');
           
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(body);
         });
-      } else {
+      }
+      // Handle JavaScript
+      else if (contentType.includes('javascript') || contentType.includes('application/json')) {
+        console.log('🔧 Modifying JavaScript response...');
+        
+        let body = '';
+        proxyRes.on('data', (chunk) => {
+          body += chunk.toString('utf8');
+        });
+        
+        proxyRes.on('end', () => {
+          const baseUrl = `/preview/${userId}/${port}`;
+          
+          // Rewrite imports: from "/@something" to from "/preview/user/port/@something?token=..."
+          // Also rewrite: from '/@something' (single quotes)
+          body = body.replace(
+            /(from\s+["'])(\/@[^"']+)(["'])/g,
+            `$1${baseUrl}$2?token=${token}$3`
+          );
+          
+          // Rewrite: import("/@something")
+          body = body.replace(
+            /(import\s*\(\s*["'])(\/@[^"']+)(["']\s*\))/g,
+            `$1${baseUrl}$2?token=${token}$3`
+          );
+          
+          // Rewrite: new URL("/@something", ...)
+          body = body.replace(
+            /(new\s+URL\s*\(\s*["'])(\/@[^"']+)(["'])/g,
+            `$1${baseUrl}$2?token=${token}$3`
+          );
+          
+          console.log('✅ JavaScript URLs rewritten');
+          
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(body);
+        });
+      }
+      // Everything else - just pipe through
+      else {
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
       }
