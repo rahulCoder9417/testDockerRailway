@@ -134,6 +134,7 @@ function ensureGuiSession(userId) {
         "-forever",
         "-nopw",
         "-shared",
+        "-quiet",//because novnc hit ws unecesasry and add logs
         "-rfbport",
         String(vncPort),
       ],
@@ -240,6 +241,19 @@ app.get("/gui/:userId", (req, res) => {
   const url = `/novnc/vnc.html?path=websockify/${encodedUser}&autoconnect=true&resize=scale`;
   res.redirect(url);
 });
+function rewriteWithLog(body, regex, replacer) {
+  return body.replace(regex, function (...args) {
+    const match = args[0];
+    const result = replacer(...args);
+
+    console.log(`🔄 [REWRITE]`);
+    console.log(`   BEFORE: ${match}`);
+    console.log(`   AFTER : ${result}`);
+    console.log("");
+
+    return result;
+  });
+}
 
 // ---- SECURE REVERSE PROXY (PRODUCTION BUILD PREVIEW) ----
 app.use("/preview/:userId/:port*", (req, res, next) => {
@@ -294,32 +308,96 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
       if (contentType.includes('text/html')) {
         console.log('🔧 Modifying HTML response...');
         
-        let body = '';
+       
+        let modified = "";
         proxyRes.on('data', (chunk) => {
-          body += chunk.toString('utf8');
+          modified += chunk.toString('utf8');
         });
         
         proxyRes.on('end', () => {
           const baseUrl = `/preview/${userId}/${port}`;
           
-          console.log('📝 Original HTML length:', body.length);
+          console.log('📝 Original HTML length:', modified.length);
           
-          // Rewrite absolute URLs in HTML attributes
-          body = body.replace(
+
+          // 1️⃣ Rewrite src="/..."
+          // Example: <img src="/logo.png">
+          modified = rewriteWithLog(
+            modified,
             /((?:src|href))="\/([^"]*)"/g,
-            `$1="${baseUrl}/$2?token=${token}"`
+            (_, attr, assetPath) => {
+              return `${attr}="${baseUrl}/${assetPath}?token=${token}"`;
+            }
           );
           
-         // Also rewrite relative URLs in CSS/JS that reference images
-          body = body.replace(
-            /(url\(['"]?)(\/[^'")]+)(['"]?\))/g,
-            `$1${baseUrl}$2?token=${token}$3`
+          // 2️⃣ Rewrite srcset="/..., /..., /..."
+          // Example: <img srcset="/img1.png 1x, /img2.png 2x">
+          modified = rewriteWithLog(
+            modified,
+            /srcset="([^"]*)"/g,
+            (_, value) => {
+              const parts = value
+                .split(",")
+                .map(p => p.trim())
+                .map(entry => {
+                  if (!entry.startsWith("/")) return entry;
+                  const [path, size] = entry.split(" ");
+                  return `${baseUrl}${path}?token=${token} ${size || ""}`.trim();
+                })
+                .join(", ");
+              return `srcset="${parts}"`;
+            }
           );
+          
+          // 3️⃣ Rewrite CSS url("/...")
+          // Example: background: url("/img/bg.png")
+          modified = rewriteWithLog(
+            modified,
+            /(url\(['"]?)(\/[^'")]+)(['"]?\))/g,
+            (_, prefix, assetPath, suffix) => {
+              return `${prefix}${baseUrl}${assetPath}?token=${token}${suffix}`;
+            }
+          );
+          
+          // 4️⃣ Rewrite ES module imports (Vite/React/Vue/Next static JS imports)
+          // Example: import x from "/assets/index-abcd123.js"
+          modified = rewriteWithLog(
+            modified,
+            /import\s+[^'"]*['"]\/([^'"]*)['"]/g,
+            (match, assetPath) => {
+              const rewritten = match.replace(
+                `"/${assetPath}"`,
+                `"/preview/${userId}/${port}/${assetPath}?token=${token}"`
+              );
+              return rewritten;
+            }
+          );
+          
+          // 5️⃣ Rewrite script tags <script src="/...">
+          // Example: <script src="/assets/app.js">
+          modified = rewriteWithLog(
+            modified,
+            /<script[^>]+src="\/([^"]*)"/g,
+            (_, assetPath) => {
+              return `<script src="${baseUrl}/${assetPath}?token=${token}"`;
+            }
+          );
+          
+          // 6️⃣ Rewrite link rel="stylesheet" href="/..."
+          // Example: <link rel="stylesheet" href="/assets/style.css">
+          modified = rewriteWithLog(
+            modified,
+            /<link[^>]+href="\/([^"]*)"/g,
+            (_, assetPath) => {
+              return `<link rel="stylesheet" href="${baseUrl}/${assetPath}?token=${token}"`;
+            }
+          );
+          
           
           console.log('✅ HTML URLs rewritten');
           
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
-          res.end(body);
+          res.end(modified);
         });
       } 
       // Pass through everything else (images, JS, fonts, etc.)
