@@ -28,6 +28,7 @@ const GUI_BASE_DISPLAY = 100;
 const GUI_BASE_VNC_PORT = 5900;
 let nextGuiIndex = 1;
 
+
 // ---- TOKEN GENERATION ----
 function generatePreviewToken(userId, port) {
   const secret = process.env.PREVIEW_SECRET || "supersecret";
@@ -58,14 +59,10 @@ function getUserSession(userId) {
   return sessions[userId];
 }
 
-// ============================================================
-// GUI CHANGE #1: Made function async and added proper waiting
-// ============================================================
-async function ensureGuiSession(userId) {
+function ensureGuiSession(userId) {
   const session = getUserSession(userId);
 
-  // CHANGE: Added ready flag check
-  if (session.gui && session.gui.display && session.gui.vncPort && session.gui.ready) {
+  if (session.gui && session.gui.display && session.gui.vncPort) {
     console.log(`♻️  Reusing existing GUI session: display=${session.gui.display}`);
     return session.gui;
   }
@@ -77,150 +74,100 @@ async function ensureGuiSession(userId) {
 
   console.log(`🎬 Starting Xvfb on display ${display}...`);
 
-  // CHANGE: Added -ac flag (disable access control) and captured stdio
   const xvfb = spawn("Xvfb", [display, "-screen", "0", "1920x1080x24", "-ac"], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
   });
 
-  // CHANGE: Added logging for Xvfb output
-  xvfb.stdout?.on("data", (data) => console.log(`[Xvfb ${display}] ${data.toString().trim()}`));
-  xvfb.stderr?.on("data", (data) => console.error(`[Xvfb ${display}] ${data.toString().trim()}`));
+  xvfb.stdout?.on("data", (data) => console.log(`[Xvfb ${display}] ${data}`));
+  xvfb.stderr?.on("data", (data) => console.error(`[Xvfb ${display}] ${data}`));
   xvfb.on("error", (err) => console.error(`❌ Xvfb error on ${display}:`, err));
   xvfb.on("exit", (code) => console.log(`Xvfb ${display} exited with code ${code}`));
 
-  // ============================================================
-  // GUI CHANGE #2: Wait for Xvfb to be ready before continuing
-  // ============================================================
+  // Wait for Xvfb to be ready
   const waitForDisplay = () => {
     return new Promise((resolve) => {
-      let attempts = 0;
-      const maxAttempts = 50; // 5 seconds max (50 * 100ms)
-      
       const checkInterval = setInterval(() => {
-        attempts++;
-        // Use xdpyinfo to test if display is ready
         const testProcess = spawn("xdpyinfo", ["-display", display], {
           stdio: "ignore",
         });
         testProcess.on("exit", (code) => {
           if (code === 0) {
-            // Display is ready!
             clearInterval(checkInterval);
             console.log(`✅ Xvfb ${display} is ready!`);
-            resolve(true);
-          } else if (attempts >= maxAttempts) {
-            // Timeout
-            clearInterval(checkInterval);
-            console.error(`❌ Xvfb ${display} failed to start after ${maxAttempts} attempts`);
-            resolve(false);
+            resolve();
           }
         });
-      }, 100); // Check every 100ms
+      }, 100);
+
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        clearInterval(checkInterval);
+        console.warn(`⚠️  Xvfb ${display} timeout, proceeding anyway...`);
+        resolve();
+      }, 5000);
     });
   };
 
-  // Wait for Xvfb
-  const xvfbReady = await waitForDisplay();
-  if (!xvfbReady) {
-    console.error(`❌ Failed to start GUI session for user=${userId}`);
-    return null;
-  }
-
-  // ============================================================
-  // GUI CHANGE #3: Start window manager AFTER Xvfb is ready
-  // ============================================================
-  console.log(`🪟 Starting fluxbox on ${display}...`);
-  const wm = spawn("fluxbox", [], {
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: false,
-    env: {
-      ...process.env,
-      DISPLAY: display,
-    },
-  });
-
-  // CHANGE: Added logging for fluxbox output
-  wm.stdout?.on("data", (data) => console.log(`[fluxbox ${display}] ${data.toString().trim()}`));
-  wm.stderr?.on("data", (data) => console.error(`[fluxbox ${display}] ${data.toString().trim()}`));
-  wm.on("error", (err) => console.error(`❌ fluxbox error on ${display}:`, err));
-
-  // ============================================================
-  // GUI CHANGE #4: Start x11vnc with additional flags
-  // ============================================================
-  console.log(`📡 Starting x11vnc on ${display} port ${vncPort}...`);
-  const x11vnc = spawn(
-    "x11vnc",
-    [
-      "-display",
-      display,
-      "-forever",
-      "-nopw",
-      "-shared",
-      "-rfbport",
-      String(vncPort),
-      "-bg",           // CHANGE: Run in background
-      "-o",            // CHANGE: Redirect output
-      "/dev/null",
-    ],
-    {
+  // Start window manager after Xvfb is ready
+  waitForDisplay().then(() => {
+    console.log(`🪟 Starting fluxbox on ${display}...`);
+    const wm = spawn("fluxbox", [], {
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
-    }
-  );
-
-  // CHANGE: Added logging for x11vnc output
-  x11vnc.stdout?.on("data", (data) => console.log(`[x11vnc ${display}] ${data.toString().trim()}`));
-  x11vnc.stderr?.on("data", (data) => console.error(`[x11vnc ${display}] ${data.toString().trim()}`));
-  x11vnc.on("error", (err) => console.error(`❌ x11vnc error on ${display}:`, err));
-
-  // ============================================================
-  // GUI CHANGE #5: Wait for x11vnc to be ready
-  // ============================================================
-  const waitForVnc = () => {
-    return new Promise((resolve) => {
-      let attempts = 0;
-      const maxAttempts = 50;
-      
-      const checkInterval = setInterval(() => {
-        attempts++;
-        // Try to connect to VNC port
-        const client = net.connect(vncPort, "127.0.0.1", () => {
-          // Connection successful!
-          clearInterval(checkInterval);
-          client.end();
-          console.log(`✅ x11vnc ready on port ${vncPort}`);
-          resolve(true);
-        });
-        
-        client.on("error", () => {
-          // Connection failed, keep trying
-          if (attempts >= maxAttempts) {
-            clearInterval(checkInterval);
-            console.error(`❌ x11vnc failed to start on port ${vncPort}`);
-            resolve(false);
-          }
-        });
-      }, 100); // Check every 100ms
+      env: {
+        ...process.env,
+        DISPLAY: display,
+      },
     });
-  };
 
-  const vncReady = await waitForVnc();
-  if (!vncReady) {
-    console.error(`❌ Failed to start x11vnc for user=${userId}`);
-  }
+    wm.stdout?.on("data", (data) => console.log(`[fluxbox ${display}] ${data}`));
+    wm.stderr?.on("data", (data) => console.error(`[fluxbox ${display}] ${data}`));
+    wm.on("error", (err) => console.error(`❌ fluxbox error on ${display}:`, err));
 
-  // CHANGE: Added ready flag
+    console.log(`📡 Starting x11vnc on ${display} port ${vncPort}...`);
+    const x11vnc = spawn(
+      "x11vnc",
+      [
+        "-display",
+        display,
+        "-forever",
+        "-nopw",
+        "-shared",
+        "-rfbport",
+        String(vncPort),
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
+      }
+    );
+
+    x11vnc.stdout?.on("data", (data) => console.log(`[x11vnc ${display}] ${data}`));
+    x11vnc.stderr?.on("data", (data) => console.error(`[x11vnc ${display}] ${data}`));
+    x11vnc.on("error", (err) => console.error(`❌ x11vnc error on ${display}:`, err));
+
+    if (session.gui && session.gui.processes) {
+      session.gui.processes.wm = wm;
+      session.gui.processes.x11vnc = x11vnc;
+    }
+  });
+
   const guiSession = {
     display,
     vncPort,
     index,
-    processes: { xvfb, x11vnc, wm },
-    ready: vncReady,  // CHANGE: Track if GUI is fully ready
+    processes: { xvfb },
+    ready: false,
   };
 
   session.gui = guiSession;
-  console.log(`✅ GUI session fully initialized for user=${userId} display=${display} vncPort=${vncPort}`);
+  
+  // Mark as ready after wait
+  waitForDisplay().then(() => {
+    guiSession.ready = true;
+    console.log(`✅ GUI session fully initialized for user=${userId} display=${display} vncPort=${vncPort}`);
+  });
 
   return guiSession;
 }
@@ -339,10 +286,11 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
     onProxyRes: (proxyRes, req, res) => {
       console.log(`⬅️  Response received: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
       console.log(`📄 Content-Type: ${proxyRes.headers['content-type']}`);
+      console.log(`📂 Request path: ${req.path}`);
       
       const contentType = proxyRes.headers['content-type'] || '';
       
-      // Only rewrite HTML for production builds
+      // Rewrite HTML
       if (contentType.includes('text/html')) {
         console.log('🔧 Modifying HTML response...');
         
@@ -354,16 +302,24 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
         proxyRes.on('end', () => {
           const baseUrl = `/preview/${userId}/${port}`;
           
-          // Rewrite absolute URLs for production builds
+          console.log('📝 Original HTML length:', body.length);
+          
+          // Rewrite absolute URLs in HTML attributes
           body = body.replace(
-            /((?:src|href))="\/([^"]*)"/g,
-            `$1="${baseUrl}/$2?token=${token}"`
+            /((?:src|href|srcset))="\/([^"]*)"/g,
+            (match, attr, path) => {
+              console.log(`  Rewriting ${attr}="/${path}" → ${attr}="${baseUrl}/${path}?token=${token}"`);
+              return `${attr}="${baseUrl}/${path}?token=${token}"`;
+            }
           );
           
-          // Also rewrite relative URLs in CSS/JS that reference images
+          // Rewrite CSS url() - inline styles
           body = body.replace(
             /(url\(['"]?)(\/[^'")]+)(['"]?\))/g,
-            `$1${baseUrl}$2?token=${token}$3`
+            (match, prefix, path, suffix) => {
+              console.log(`  Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);
+              return `${prefix}${baseUrl}${path}?token=${token}${suffix}`;
+            }
           );
           
           console.log('✅ HTML URLs rewritten');
@@ -371,7 +327,37 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(body);
         });
-      } else {
+      } 
+      // Rewrite CSS files
+      else if (contentType.includes('text/css')) {
+        console.log('🎨 Modifying CSS response...');
+        
+        let body = '';
+        proxyRes.on('data', (chunk) => {
+          body += chunk.toString('utf8');
+        });
+        
+        proxyRes.on('end', () => {
+          const baseUrl = `/preview/${userId}/${port}`;
+          
+          // Rewrite url() in CSS
+          body = body.replace(
+            /url\(['"]?(\/[^'")]+)['"]?\)/g,
+            (match, path) => {
+              console.log(`  CSS: Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);
+              return `url(${baseUrl}${path}?token=${token})`;
+            }
+          );
+          
+          console.log('✅ CSS URLs rewritten');
+          
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(body);
+        });
+      }
+      // Pass through everything else (images, JS, fonts, etc.)
+      else {
+        console.log('📦 Passing through:', contentType);
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
       }
@@ -392,10 +378,7 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
 const wss = new WebSocketServer({ noServer: true });
 const vncWss = new WebSocketServer({ noServer: true });
 
-// ============================================================
-// GUI CHANGE #6: Made WebSocket handler async to await GUI
-// ============================================================
-wss.on("connection", async (ws, req) => {  // CHANGE: Added async
+wss.on("connection", (ws, req) => {
   const userId = req.userId;
   const terminalId = req.terminalId;
 
@@ -403,24 +386,12 @@ wss.on("connection", async (ws, req) => {  // CHANGE: Added async
 
   const session = getUserSession(userId);
 
-  // ============================================================
-  // GUI CHANGE #7: Auto-create GUI session and wait for it
-  // ============================================================
-  const gui = await ensureGuiSession(userId);  // CHANGE: Added await
-  
-  if (!gui || !gui.ready) {
-    console.error(`❌ Failed to create GUI session for user=${userId}`);
-    ws.send(`\r\n❌ Error: Failed to initialize GUI session\r\n`);
-  } else {
-    console.log(`🖼️  GUI session assigned: DISPLAY=${gui.display} VNC=:${gui.vncPort} for user=${userId}`);
-    
-    // CHANGE: Send GUI info to user
-    ws.send(`\r\n🖼️  GUI Display ready: ${gui.display} (VNC port: ${gui.vncPort})\r\n`);
-    ws.send(`💡 Access GUI at: /gui/${userId}\r\n\r\n`);
-  }
+  // ✅ AUTO-ASSIGN GUI: Create GUI session when user opens any terminal
+  const gui = ensureGuiSession(userId);
+  console.log(`🖼️  GUI session assigned: DISPLAY=${gui.display} VNC=:${gui.vncPort} for user=${userId}`);
 
-  // CHANGE: Always set DISPLAY (with fallback)
-  let env = { ...process.env, DISPLAY: gui?.display || process.env.DISPLAY };
+  // Set environment with DISPLAY variable
+  let env = { ...process.env, DISPLAY: gui.display };
 
   const ptyProcess = pty.spawn("bash", [], {
     name: "xterm-color",
@@ -431,6 +402,10 @@ wss.on("connection", async (ws, req) => {  // CHANGE: Added async
   });
 
   session.terminals[terminalId] = ptyProcess;
+
+  // Send GUI info to frontend on connection
+  ws.send(`\r\n🖼️  GUI Display ready: ${gui.display} (VNC port: ${gui.vncPort})\r\n`);
+  ws.send(`💡 Access GUI at: /gui/${userId}\r\n\r\n`);
 
   ptyProcess.on("data", (data) => {
     ws.send(data);
@@ -486,6 +461,18 @@ wss.on("connection", async (ws, req) => {  // CHANGE: Added async
     }
     delete session.terminals[terminalId];
     console.log(`🖥️  Terminal closed: user=${userId}, terminal=${terminalId}`);
+    
+    // CLEANUP: If no more terminals for this user, stop GUI session after delay
+    if (Object.keys(session.terminals).length === 0) {
+      console.log(`⏳ Last terminal closed for user=${userId}, scheduling GUI cleanup in 60s...`);
+      setTimeout(() => {
+        // Double-check no new terminals were opened
+        if (Object.keys(session.terminals).length === 0) {
+          console.log(`🧹 Cleaning up GUI session for inactive user=${userId}`);
+          stopGuiSession(userId);
+        }
+      }, 60000); // 60 second grace period
+    }
   });
 });
 
@@ -664,6 +651,7 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(PORT, () => {
   console.log(`\n🚀 ============ SERVER STARTED ============`);
   console.log(`📡 Port: ${PORT}`);
+  console.log(`📂 Project root: ${PROJECT_ROOT}`);
   console.log(`🔐 Preview secret: ${process.env.PREVIEW_SECRET ? 'Set from env' : 'Using default "supersecret"'}`);
   console.log(`\n📝 USAGE INSTRUCTIONS:`);
   console.log(`   1. Build your app: npm run build`);
