@@ -306,20 +306,14 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
           
           // Rewrite absolute URLs in HTML attributes
           body = body.replace(
-            /((?:src|href|srcset))="\/([^"]*)"/g,
-            (match, attr, path) => {
-              console.log(`  Rewriting ${attr}="/${path}" → ${attr}="${baseUrl}/${path}?token=${token}"`);
-              return `${attr}="${baseUrl}/${path}?token=${token}"`;
-            }
+            /((?:src|href))="\/([^"]*)"/g,
+            `$1="${baseUrl}/$2?token=${token}"`
           );
           
-          // Rewrite CSS url() - inline styles
+         // Also rewrite relative URLs in CSS/JS that reference images
           body = body.replace(
             /(url\(['"]?)(\/[^'")]+)(['"]?\))/g,
-            (match, prefix, path, suffix) => {
-              console.log(`  Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);
-              return `${prefix}${baseUrl}${path}?token=${token}${suffix}`;
-            }
+            `$1${baseUrl}$2?token=${token}$3`
           );
           
           console.log('✅ HTML URLs rewritten');
@@ -328,33 +322,6 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
           res.end(body);
         });
       } 
-      // Rewrite CSS files
-      else if (contentType.includes('text/css')) {
-        console.log('🎨 Modifying CSS response...');
-        
-        let body = '';
-        proxyRes.on('data', (chunk) => {
-          body += chunk.toString('utf8');
-        });
-        
-        proxyRes.on('end', () => {
-          const baseUrl = `/preview/${userId}/${port}`;
-          
-          // Rewrite url() in CSS
-          body = body.replace(
-            /url\(['"]?(\/[^'")]+)['"]?\)/g,
-            (match, path) => {
-              console.log(`  CSS: Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);
-              return `url(${baseUrl}${path}?token=${token})`;
-            }
-          );
-          
-          console.log('✅ CSS URLs rewritten');
-          
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
-          res.end(body);
-        });
-      }
       // Pass through everything else (images, JS, fonts, etc.)
       else {
         console.log('📦 Passing through:', contentType);
