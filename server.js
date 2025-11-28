@@ -206,7 +206,7 @@ app.use((req, res, next) => {
   const referer = req.get("referer");  // e.g. https://server/preview/user/port?token=...
 
   // If no referer → definitely NOT a preview asset call
-  if (!referer) return next();
+  if (!referer || url.startsWith("/preview/")) return next();
 
   // Detect asset extensions (add/remove as needed)
   const isAsset = /\.(png|jpg|jpeg|gif|svg|ico|webp|avif|css|map|js|woff2?|ttf|otf)$/i.test(url);
