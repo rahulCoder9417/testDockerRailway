@@ -28,24 +28,6 @@ const GUI_BASE_DISPLAY = 100;
 const GUI_BASE_VNC_PORT = 5900;
 let nextGuiIndex = 1;
 
-// ---- PORT MANAGER ----
-const PREVIEW_PORT_RANGE = { min: 4000, max: 4100 };
-const allocatedPorts = new Set();
-
-function findFreePort() {
-  for (let port = PREVIEW_PORT_RANGE.min; port <= PREVIEW_PORT_RANGE.max; port++) {
-    if (!allocatedPorts.has(port)) {
-      allocatedPorts.add(port);
-      return port;
-    }
-  }
-  throw new Error("No free ports available in range");
-}
-
-function releasePort(port) {
-  allocatedPorts.delete(port);
-}
-
 // ---- TOKEN GENERATION ----
 function generatePreviewToken(userId, port) {
   const secret = process.env.PREVIEW_SECRET || "supersecret";
@@ -682,8 +664,6 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(PORT, () => {
   console.log(`\n🚀 ============ SERVER STARTED ============`);
   console.log(`📡 Port: ${PORT}`);
-  console.log(`📂 Project root: ${PROJECT_ROOT}`);
-  console.log(`🔌 Preview port range: ${PREVIEW_PORT_RANGE.min}-${PREVIEW_PORT_RANGE.max}`);
   console.log(`🔐 Preview secret: ${process.env.PREVIEW_SECRET ? 'Set from env' : 'Using default "supersecret"'}`);
   console.log(`\n📝 USAGE INSTRUCTIONS:`);
   console.log(`   1. Build your app: npm run build`);
