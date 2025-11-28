@@ -197,6 +197,35 @@ app.use(
   })
 );
 app.use(express.json());
+// ==================================================================================
+//  REFRER use karke asset ke userId port milgya
+// ==================================================================================
+
+app.use((req, res, next) => {
+  const url = req.path;                // e.g. /vite.svg
+  const referer = req.get("referer");  // e.g. https://server/preview/user/port?token=...
+
+  // If no referer → definitely NOT a preview asset call
+  if (!referer) return next();
+
+  // Detect asset extensions (add/remove as needed)
+  const isAsset = /\.(png|jpg|jpeg|gif|svg|ico|webp|avif|css|map|js|woff2?|ttf|otf)$/i.test(url);
+  if (!isAsset) return next();
+
+  // Check if referer is inside preview environment
+  const match = referer.match(/\/preview\/([^/]+)\/(\d+)\?token=([^&]+)/);
+  if (!match) return next();
+
+  const [, userId, port, token] = match;
+
+  // Construct rewritten preview path
+  const rewritten = `/preview/${userId}/${port}${url}?token=${token}`;
+
+  console.log(`🔁 Asset fix: ${url} → ${rewritten}`);
+
+  // Redirect browser to correct preview URL
+  return res.redirect(rewritten);
+});
 
 // ---- HEALTH CHECK ----
 app.get("/health", (req, res) => {
