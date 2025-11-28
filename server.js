@@ -271,6 +271,7 @@ app.get("/gui/:userId", (req, res) => {
   res.redirect(url);
 });
 
+
 // ---- SECURE REVERSE PROXY (PRODUCTION BUILD PREVIEW) ----
 app.use("/preview/:userId/:port*", (req, res, next) => {
   const { userId, port } = req.params;
@@ -316,11 +317,10 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
     onProxyRes: (proxyRes, req, res) => {
       console.log(`⬅️  Response received: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
       console.log(`📄 Content-Type: ${proxyRes.headers['content-type']}`);
-      console.log(`📂 Request path: ${req.path}`);
       
       const contentType = proxyRes.headers['content-type'] || '';
       
-      // Rewrite HTML
+      // Only rewrite HTML for production builds
       if (contentType.includes('text/html')) {
         console.log('🔧 Modifying HTML response...');
         
@@ -332,21 +332,16 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
         proxyRes.on('end', () => {
           const baseUrl = `/preview/${userId}/${port}`;
           
-          console.log('📝 Original HTML length:', body.length);
-          
-          // Rewrite absolute URLs in HTML attributes
+          // Rewrite absolute URLs for production builds
           body = body.replace(
-            /((?:src|href|srcset))="\/([^"]*)"/g,
-            `$1${baseUrl}$2?token=${token}$3`
+            /((?:src|href))="\/([^"]*)"/g,
+            `$1="${baseUrl}/$2?token=${token}"`
           );
           
-          // Rewrite CSS url() - inline styles
+          // Also rewrite relative URLs in CSS/JS that reference images
           body = body.replace(
             /(url\(['"]?)(\/[^'")]+)(['"]?\))/g,
-            (match, prefix, path, suffix) => {
-              console.log(`  Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);
-              return `${prefix}${baseUrl}${path}?token=${token}${suffix}`;
-            }
+            `$1${baseUrl}$2?token=${token}$3`
           );
           
           console.log('✅ HTML URLs rewritten');
@@ -354,37 +349,7 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(body);
         });
-      } 
-      // Rewrite CSS files
-      else if (contentType.includes('text/css')) {
-        console.log('🎨 Modifying CSS response...');
-        
-        let body = '';
-        proxyRes.on('data', (chunk) => {
-          body += chunk.toString('utf8');
-        });
-        
-        proxyRes.on('end', () => {
-          const baseUrl = `/preview/${userId}/${port}`;
-          
-          // Rewrite url() in CSS
-          body = body.replace(
-            /url\(['"]?(\/[^'")]+)['"]?\)/g,
-            (match, path) => {
-              console.log(`  CSS: Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);
-              return `url(${baseUrl}${path}?token=${token})`;
-            }
-          );
-          
-          console.log('✅ CSS URLs rewritten');
-          
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
-          res.end(body);
-        });
-      }
-      // Pass through everything else (images, JS, fonts, etc.)
-      else {
-        console.log('📦 Passing through:', contentType);
+      } else {
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
       }
@@ -400,6 +365,7 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
 
   return proxy(req, res, next);
 });
+
 
 // ---- WEBSOCKET + PTY (code runner) ----
 const wss = new WebSocketServer({ noServer: true });
