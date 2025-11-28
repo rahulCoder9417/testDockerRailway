@@ -28,9 +28,6 @@ const GUI_BASE_DISPLAY = 100;
 const GUI_BASE_VNC_PORT = 5900;
 let nextGuiIndex = 1;
 
-
-
-
 // ---- TOKEN GENERATION ----
 function generatePreviewToken(userId, port) {
   const secret = process.env.PREVIEW_SECRET || "supersecret";
@@ -61,10 +58,11 @@ function getUserSession(userId) {
   return sessions[userId];
 }
 
-function ensureGuiSession(userId) {
+async function ensureGuiSession(userId) {
   const session = getUserSession(userId);
 
-  if (session.gui && session.gui.display && session.gui.vncPort) {
+  if (session.gui && session.gui.display && session.gui.vncPort && session.gui.ready) {
+    console.log(`♻️  Reusing existing GUI session: display=${session.gui.display}`);
     return session.gui;
   }
 
@@ -73,13 +71,55 @@ function ensureGuiSession(userId) {
   const display = `:${displayNum}`;
   const vncPort = GUI_BASE_VNC_PORT + index;
 
-  const xvfb = spawn("Xvfb", [display, "-screen", "0", "1920x1080x24"], {
-    stdio: "ignore",
+  console.log(`🎬 Starting Xvfb on display ${display}...`);
+
+  const xvfb = spawn("Xvfb", [display, "-screen", "0", "1920x1080x24", "-ac"], {
+    stdio: ["ignore", "pipe", "pipe"],
     detached: false,
   });
 
+  xvfb.stdout?.on("data", (data) => console.log(`[Xvfb ${display}] ${data.toString().trim()}`));
+  xvfb.stderr?.on("data", (data) => console.error(`[Xvfb ${display}] ${data.toString().trim()}`));
+  xvfb.on("error", (err) => console.error(`❌ Xvfb error on ${display}:`, err));
+  xvfb.on("exit", (code) => console.log(`Xvfb ${display} exited with code ${code}`));
+
+  // Wait for Xvfb to be ready
+  const waitForDisplay = () => {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      const maxAttempts = 50; // 5 seconds max
+      
+      const checkInterval = setInterval(() => {
+        attempts++;
+        const testProcess = spawn("xdpyinfo", ["-display", display], {
+          stdio: "ignore",
+        });
+        testProcess.on("exit", (code) => {
+          if (code === 0) {
+            clearInterval(checkInterval);
+            console.log(`✅ Xvfb ${display} is ready!`);
+            resolve(true);
+          } else if (attempts >= maxAttempts) {
+            clearInterval(checkInterval);
+            console.error(`❌ Xvfb ${display} failed to start after ${maxAttempts} attempts`);
+            resolve(false);
+          }
+        });
+      }, 100);
+    });
+  };
+
+  // Wait for Xvfb
+  const xvfbReady = await waitForDisplay();
+  if (!xvfbReady) {
+    console.error(`❌ Failed to start GUI session for user=${userId}`);
+    return null;
+  }
+
+  // Start window manager
+  console.log(`🪟 Starting fluxbox on ${display}...`);
   const wm = spawn("fluxbox", [], {
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     detached: false,
     env: {
       ...process.env,
@@ -87,6 +127,12 @@ function ensureGuiSession(userId) {
     },
   });
 
+  wm.stdout?.on("data", (data) => console.log(`[fluxbox ${display}] ${data.toString().trim()}`));
+  wm.stderr?.on("data", (data) => console.error(`[fluxbox ${display}] ${data.toString().trim()}`));
+  wm.on("error", (err) => console.error(`❌ fluxbox error on ${display}:`, err));
+
+  // Start x11vnc
+  console.log(`📡 Starting x11vnc on ${display} port ${vncPort}...`);
   const x11vnc = spawn(
     "x11vnc",
     [
@@ -97,28 +143,61 @@ function ensureGuiSession(userId) {
       "-shared",
       "-rfbport",
       String(vncPort),
+      "-bg",
+      "-o",
+      "/dev/null",
     ],
     {
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     }
   );
 
-  xvfb.on("error", (err) => console.error("Xvfb error:", err));
-  x11vnc.on("error", (err) => console.error("x11vnc error:", err));
-  wm.on("error", (err) => console.error("fluxbox error:", err));
+  x11vnc.stdout?.on("data", (data) => console.log(`[x11vnc ${display}] ${data.toString().trim()}`));
+  x11vnc.stderr?.on("data", (data) => console.error(`[x11vnc ${display}] ${data.toString().trim()}`));
+  x11vnc.on("error", (err) => console.error(`❌ x11vnc error on ${display}:`, err));
+
+  // Wait for x11vnc to be ready
+  const waitForVnc = () => {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      const maxAttempts = 50;
+      
+      const checkInterval = setInterval(() => {
+        attempts++;
+        const client = net.connect(vncPort, "127.0.0.1", () => {
+          clearInterval(checkInterval);
+          client.end();
+          console.log(`✅ x11vnc ready on port ${vncPort}`);
+          resolve(true);
+        });
+        
+        client.on("error", () => {
+          if (attempts >= maxAttempts) {
+            clearInterval(checkInterval);
+            console.error(`❌ x11vnc failed to start on port ${vncPort}`);
+            resolve(false);
+          }
+        });
+      }, 100);
+    });
+  };
+
+  const vncReady = await waitForVnc();
+  if (!vncReady) {
+    console.error(`❌ Failed to start x11vnc for user=${userId}`);
+  }
 
   const guiSession = {
     display,
     vncPort,
     index,
     processes: { xvfb, x11vnc, wm },
+    ready: vncReady,
   };
 
   session.gui = guiSession;
-  console.log(
-    `Started GUI session for user=${userId} display=${display} vncPort=${vncPort}`
-  );
+  console.log(`✅ GUI session fully initialized for user=${userId} display=${display} vncPort=${vncPort}`);
 
   return guiSession;
 }
@@ -237,7 +316,7 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
     onProxyRes: (proxyRes, req, res) => {
       console.log(`⬅️  Response received: ${proxyRes.statusCode} ${proxyRes.statusMessage}`);
       console.log(`📄 Content-Type: ${proxyRes.headers['content-type']}`);
-      console.log(`📂 Request path: ${req.path}`);  // ✅ NEW: Log request path
+      console.log(`📂 Request path: ${req.path}`);
       
       const contentType = proxyRes.headers['content-type'] || '';
       
@@ -253,22 +332,19 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
         proxyRes.on('end', () => {
           const baseUrl = `/preview/${userId}/${port}`;
           
-          console.log('📝 Original HTML length:', body.length);  // ✅ NEW: Log HTML size
+          console.log('📝 Original HTML length:', body.length);
           
           // Rewrite absolute URLs in HTML attributes
           body = body.replace(
-            /((?:src|href|srcset))="\/([^"]*)"/g,  // ✅ CHANGED: Added 'srcset'
-            (match, attr, path) => {
-              console.log(`  Rewriting ${attr}="/${path}" → ${attr}="${baseUrl}/${path}?token=${token}"`);  // ✅ NEW: Log each rewrite
-              return `${attr}="${baseUrl}/${path}?token=${token}"`;
-            }
+            /((?:src|href|srcset))="\/([^"]*)"/g,
+            `$1${baseUrl}$2?token=${token}$3`
           );
           
           // Rewrite CSS url() - inline styles
           body = body.replace(
             /(url\(['"]?)(\/[^'")]+)(['"]?\))/g,
             (match, prefix, path, suffix) => {
-              console.log(`  Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);  // ✅ NEW: Log each rewrite
+              console.log(`  Rewriting url(${path}) → url(${baseUrl}${path}?token=${token})`);
               return `${prefix}${baseUrl}${path}?token=${token}${suffix}`;
             }
           );
@@ -279,7 +355,7 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
           res.end(body);
         });
       } 
-      // ✅ NEW BLOCK: Rewrite CSS files
+      // Rewrite CSS files
       else if (contentType.includes('text/css')) {
         console.log('🎨 Modifying CSS response...');
         
@@ -308,7 +384,7 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
       }
       // Pass through everything else (images, JS, fonts, etc.)
       else {
-        console.log('📦 Passing through:', contentType);  // ✅ NEW: Log pass-through
+        console.log('📦 Passing through:', contentType);
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res);
       }
@@ -329,19 +405,30 @@ app.use("/preview/:userId/:port*", (req, res, next) => {
 const wss = new WebSocketServer({ noServer: true });
 const vncWss = new WebSocketServer({ noServer: true });
 
-wss.on("connection", (ws, req) => {
+wss.on("connection", async (ws, req) => {
   const userId = req.userId;
   const terminalId = req.terminalId;
-//add condition
-// ✅ NEW: Create GUI session when user opens any terminal
-const gui = ensureGuiSession(userId);
-console.log(`🖼️  GUI session assigned: DISPLAY=${gui.display} VNC=:${gui.vncPort} for user=${userId}`);
+
   console.log(`🖥️  Terminal WS connected: user=${userId}, terminal=${terminalId}`);
 
-  let session = getUserSession(userId);
-  session.gui = gui;
- // ✅ Simplified: Always set DISPLAY (no if-check needed)
-let env = { ...process.env, DISPLAY: gui.display };
+  const session = getUserSession(userId);
+
+  // ✅ AUTO-ASSIGN GUI: Create GUI session when user opens any terminal
+  const gui = await ensureGuiSession(userId);
+  
+  if (!gui || !gui.ready) {
+    console.error(`❌ Failed to create GUI session for user=${userId}`);
+    ws.send(`\r\n❌ Error: Failed to initialize GUI session\r\n`);
+  } else {
+    console.log(`🖼️  GUI session assigned: DISPLAY=${gui.display} VNC=:${gui.vncPort} for user=${userId}`);
+    
+    // Send GUI info to frontend on connection
+    ws.send(`\r\n🖼️  GUI Display ready: ${gui.display} (VNC port: ${gui.vncPort})\r\n`);
+    ws.send(`💡 Access GUI at: /gui/${userId}\r\n\r\n`);
+  }
+
+  // Set environment with DISPLAY variable
+  let env = { ...process.env, DISPLAY: gui?.display || process.env.DISPLAY };
 
   const ptyProcess = pty.spawn("bash", [], {
     name: "xterm-color",
@@ -586,7 +673,8 @@ server.listen(PORT, () => {
   console.log(`\n🚀 ============ SERVER STARTED ============`);
   console.log(`📡 Port: ${PORT}`);
   console.log(`📂 Project root: ${PROJECT_ROOT}`);
- console.log(`\n📝 USAGE INSTRUCTIONS:`);
+  console.log(`🔐 Preview secret: ${process.env.PREVIEW_SECRET ? 'Set from env' : 'Using default "supersecret"'}`);
+  console.log(`\n📝 USAGE INSTRUCTIONS:`);
   console.log(`   1. Build your app: npm run build`);
   console.log(`   2. Start production server: npm start`);
   console.log(`   3. Preview will be detected automatically`);
