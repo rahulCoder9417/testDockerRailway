@@ -200,32 +200,34 @@ app.use(express.json());
 // ==================================================================================
 //  REFRER use karke asset ke userId port milgya
 // ==================================================================================
-
 app.use((req, res, next) => {
-  const url = req.path;                // e.g. /vite.svg
-  const referer = req.get("referer");  // e.g. https://server/preview/user/port?token=...
+  const url = req.path; // e.g. /vite.svg
+  const referer = req.get("referer");
 
-  // If no referer → definitely NOT a preview asset call
-  if (!referer || url.startsWith("/preview/")) return next();
+  // Ignore if no referer or request is already inside preview route
+  const previewPattern = /^\/preview\/[^/]+\/\d+\//;
+  if (!referer || previewPattern.test(url)) {
+    return next();
+  }
 
-  // Detect asset extensions (add/remove as needed)
-  const isAsset = /\.(png|jpg|jpeg|gif|svg|ico|webp|avif|css|map|js|woff2?|ttf|otf)$/i.test(url);
+  // Detect assets
+  const isAsset = /\.(png|jpe?g|gif|svg|ico|webp|avif|css|map|js|woff2?|ttf|otf)$/i.test(url);
   if (!isAsset) return next();
 
-  // Check if referer is inside preview environment
+  // Extract preview info from referer
   const match = referer.match(/\/preview\/([^/]+)\/(\d+)\?token=([^&]+)/);
   if (!match) return next();
 
   const [, userId, port, token] = match;
 
-  // Construct rewritten preview path
+  // Rewrite only once
   const rewritten = `/preview/${userId}/${port}${url}?token=${token}`;
 
   console.log(`🔁 Asset fix: ${url} → ${rewritten}`);
 
-  // Redirect browser to correct preview URL
   return res.redirect(rewritten);
 });
+
 
 // ---- HEALTH CHECK ----
 app.get("/health", (req, res) => {
